@@ -8,6 +8,7 @@ using SpecialFunctions: digamma, lgamma, lbeta, erfc, lfactorial
 using LinearAlgebra: Diagonal, Hermitian, isposdef, ishermitian, I
 using InteractiveUtils: subtypes
 using Printf: @sprintf
+using ForwardDiff
 
 import Statistics: mean, var, cov
 import Base: +, -, *, ^, ==, exp, convert, show, prod!
@@ -55,6 +56,7 @@ include("factor_nodes/softmax.jl")
 include("factor_nodes/nonlinear.jl")
 include("factor_nodes/dot_product.jl")
 include("factor_nodes/poisson.jl")
+include("factor_nodes/rgmp_likelihood.jl")
 
 
 # Factor graph
@@ -102,6 +104,7 @@ include("update_rules/softmax.jl")
 include("update_rules/nonlinear.jl")
 include("update_rules/dot_product.jl")
 include("update_rules/poisson.jl")
+include("update_rules/rgmp_likelihood.jl")
 
 
 *(x::ProbabilityDistribution, y::ProbabilityDistribution) = prod!(x, y) # * operator for probability distributions
