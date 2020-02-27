@@ -61,6 +61,8 @@ unsafeVar(dist::ProbabilityDistribution{Univariate, Beta}) = dist.params[:a]*dis
 
 logPdf(dist::ProbabilityDistribution{Univariate, Beta}, x) = (dist.params[:a]-1)*log(x) + (dist.params[:b]-1)*log(1.0-x) - labsgamma(dist.params[:a]) - labsgamma(dist.params[:b]) + labsgamma(dist.params[:a]+dist.params[:b])
 
+sample(dist::ProbabilityDistribution{Univariate, Beta}) = betainvcdf(dist.params[:a], dist.params[:b], rand())
+
 function prod!( x::ProbabilityDistribution{Univariate, Beta},
                 y::ProbabilityDistribution{Univariate, Beta},
                 z::ProbabilityDistribution{Univariate, Beta}=ProbabilityDistribution(Univariate, Beta, a=1.0, b=1.0))
