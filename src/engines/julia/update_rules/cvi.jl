@@ -91,6 +91,28 @@ function ruleSPCVIOutVD(node_id::Symbol,
 
 end
 
+function ruleSPCVIOutVD(node_id::Symbol,
+                        msg_out::Any,
+                        msg_in::Message)
+
+    thenode = currentGraph().nodes[node_id]
+
+    samples = thenode.g.(sample(msg_in.dist, thenode.num_samples))
+    weights = ones(thenode.num_samples)/thenode.num_samples
+
+    if length(samples[1]) == 1
+        variate = Univariate
+    else
+        variate = Multivariate
+    end
+
+    q=ProbabilityDistribution(variate, SampleList, s=samples, w=weights)
+    q.params[:entropy] = 0
+
+    return Message(variate,SetSampleList,q=q,node_id=node_id)
+
+end
+
 function ruleSPCVIInX(node_id::Symbol,
                       inx::Int64,
                       msg_out::Message{<:FactorFunction, <:VariateType},
@@ -224,7 +246,12 @@ function collectSumProductNodeInbounds(node::CVI, entry::ScheduleEntry)
             push!(inbounds, assembleClamp!(inbound_interface.node, ProbabilityDistribution))
         else
             # Collect entry from marginal schedule
-            push!(inbounds, target_to_marginal_entry[node_interface.edge.variable])
+            try
+                push!(inbounds, target_to_marginal_entry[node_interface.edge.variable])
+            catch
+                # This rule is useful for the last time step in a time series model with Structured VMP
+                push!(inbounds, interface_to_schedule_entry[inbound_interface])
+            end
         end
     end
 

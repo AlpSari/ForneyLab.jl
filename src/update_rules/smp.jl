@@ -1,17 +1,17 @@
-@sumProductRule(:node_type     => CVI,
+@sumProductRule(:node_type     => SMP,
                       :outbound_type => Message{SetSampleList},
                       :inbound_types => (Nothing, Message{FactorNode}),
-                      :name          => SPCVIOutVD)
+                      :name          => SPSMPOutVD)
 
-@sumProductRule(:node_type     => CVI,
+@sumProductRule(:node_type     => SMP,
                       #:outbound_type => Message{Union{GaussianWeightedMeanPrecision,FactorNode}},
                       :outbound_type => Message{GaussianWeightedMeanPrecision},
                       :inbound_types => (Message{FactorFunction}, Nothing),
-                      :name          => SPCVIIn1MV)
+                      :name          => SPSMPIn1MV)
 
-mutable struct SPCVIOutVDX <: SumProductRule{CVI} end
-outboundType(::Type{SPCVIOutVDX}) = Message{SetSampleList}
-function isApplicable(::Type{SPCVIOutVDX}, input_types::Vector{<:Type})
+mutable struct SPSMPOutVDX <: SumProductRule{SMP} end
+outboundType(::Type{SPSMPOutVDX}) = Message{SetSampleList}
+function isApplicable(::Type{SPSMPOutVDX}, input_types::Vector{<:Type})
     total_inputs = length(input_types)
     (total_inputs > 2) || return false
     (input_types[1] == Nothing) || return false
@@ -23,9 +23,9 @@ function isApplicable(::Type{SPCVIOutVDX}, input_types::Vector{<:Type})
     return true
 end
 
-mutable struct SPCVIInX <: SumProductRule{CVI} end
-outboundType(::Type{SPCVIInX}) = Message{Union{FactorNode,GaussianWeightedMeanPrecision}}
-function isApplicable(::Type{SPCVIInX}, input_types::Vector{<:Type})
+mutable struct SPSMPInX <: SumProductRule{SMP} end
+outboundType(::Type{SPSMPInX}) = Message{Union{FactorNode,GaussianWeightedMeanPrecision}}
+function isApplicable(::Type{SPSMPInX}, input_types::Vector{<:Type})
     total_inputs = length(input_types)
     (total_inputs > 2) || return false
     (input_types[1] != Nothing) || return false

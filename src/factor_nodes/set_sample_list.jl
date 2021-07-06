@@ -25,8 +25,6 @@ ProbabilityDistribution(::Type{SetSampleList}; kwargs...) = ProbabilityDistribut
                             y::ProbabilityDistribution{V, F},
                             z::ProbabilityDistribution{V, SampleList} = ProbabilityDistribution(V, SampleList)) where {V<:VariateType, F<:FactorNode}
 
-    thenode = currentGraph().nodes[x.params[:node_id]]
-    thenode.message = y
     return deepcopy(x.params[:q])
 end
 
@@ -34,8 +32,6 @@ end
                             y::ProbabilityDistribution{Univariate, F},
                             z::ProbabilityDistribution{Univariate, SampleList} = ProbabilityDistribution(Univariate, SampleList)) where {F<:Gaussian}
 
-    thenode = currentGraph().nodes[x.params[:node_id]]
-    thenode.message = y
     return deepcopy(x.params[:q])
 end
 
@@ -43,8 +39,6 @@ end
                             y::ProbabilityDistribution{Multivariate, F},
                             z::ProbabilityDistribution{Multivariate, SampleList} = ProbabilityDistribution(Multivariate, SampleList)) where {F<:Gaussian}
 
-    thenode = currentGraph().nodes[x.params[:node_id]]
-    thenode.message = y
     return deepcopy(x.params[:q])
 end
 
@@ -52,7 +46,5 @@ end
                             y::ProbabilityDistribution{MatrixVariate, Wishart},
                             z::ProbabilityDistribution{Multivariate, SampleList} = ProbabilityDistribution(Multivariate, SampleList))
 
-    thenode = currentGraph().nodes[x.params[:node_id]]
-    thenode.message = y
     return deepcopy(x.params[:q])
 end
