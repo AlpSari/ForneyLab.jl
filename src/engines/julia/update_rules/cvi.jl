@@ -176,76 +176,90 @@ end
 # CVI implementations
 #---------------------------
 
+
+# TODO: Make λ_init in renderCVI functions BCN parameters
+# TODO: Test all functions defined here
+# Standard parameters to BC parameters
+bcParams(dist::ProbabilityDistribution{Univariate, F}) where F<:Gaussian = [unsafeMean(dist),unsafePrecision(dist)]
+bcParams(dist::ProbabilityDistribution{Multivariate, F}) where F<:Gaussian = [vec(unsafeMean(dist)); vec(unsafePrecision(dist))]
+# BC parameters to Natural parameters
+function bcToNaturalParams(dist::ProbabilityDistribution{Univariate, F}, η::Vector) where F<:Gaussian
+    λ = [η[1]*η[2],-0.5*η[2]]
+end
+function bcToNaturalParams(dist::ProbabilityDistribution{Multivariate, F}, η::Vector) where F<:Gaussian
+    d = dims(dist)
+    λ=[η[1:d].*η[d+1:end];-0.5*η[d+1:end]]
+end
+# BC parameters to standard dist. type
+function bcTostandardDist(dist::ProbabilityDistribution{Univariate, F}, η::Vector) where F<:Gaussian
+    ProbabilityDistribution(Univariate, GaussianWeightedMeanPrecision,xi=η[1]*η[2],w=η[2])
+end
+
+function bcTostandardDist(dist::ProbabilityDistribution{Multivariate, F}, η::Vector) where F<:Gaussian
+    d = dims(dist)
+    XI, W = η[d+1:end].*η[1:d], reshape(η[d+1:end],d,d)
+    W = Matrix(Hermitian(W + tiny*diageye(d))) # Ensure precision is always invertible
+    ProbabilityDistribution(Multivariate, GaussianWeightedMeanPrecision,xi=XI,w=W)
+end
+
+
 function renderCVI(logp_nc::Function,
                    num_iterations::Int,
                    opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent},
                    λ_init::Vector,
                    msg_in::Message{<:Gaussian, Univariate})
 
-    η = deepcopy(naturalParams(msg_in.dist))
-    λ = deepcopy(λ_init)
-
-    df_m(z) = ForwardDiff.derivative(logp_nc,z)
-    df_v(z) = 0.5*ForwardDiff.derivative(df_m,z)
-
-    flag_alp = true
-    if flag_alp
-        # First Code
-        τ = η[2]*-2.0
-        m_prior = deepcopy(unsafeMean(msg_in.dist))
-
-        m_t = deepcopy(unsafeMean(msg_in.dist))
-        prec_t = deepcopy(unsafePrecision(msg_in.dist))
+    flag_CVI = false
+    flag_IBL = true
+    if flag_CVI
+        η = deepcopy(naturalParams(msg_in.dist))
+        λ = deepcopy(λ_init)
+        df_m(z) = ForwardDiff.derivative(logp_nc,z)
+        df_v(z) = 0.5*ForwardDiff.derivative(df_m,z)
+        # CVI Original w/ naturalParams
         for i=1:num_iterations
             q = standardDist(msg_in.dist,λ)
             z_s = sample(q)
-            # grad + hessian for nonconj factor
-            g_i = df_m(z_s)
-            H_i = 2*df_v(z_s)
-            # updates (from Nat Grad CVI Eqn16-17 + p(z) deki meani hesaba kat)
-            m_t = m_t + 0.1*(1.0/prec_t)*(g_i+prec_t*(m_prior-m_t))
-            prec_t = prec_t+0.1*(τ-H_i-prec_t)
-            #m_t = m_t - 0.1*(1.0/prec_t)*(τ*m_t-g_i-m_prior)
+            df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
+            df_μ2 = df_v(z_s)
+            ∇f = [df_μ1, df_μ2]
+            λ_old = deepcopy(λ)
+            ∇ = λ .- η .- ∇f
+            update!(opt,λ,∇)
+            # if isProper(standardDist(msg_in.dist,λ)) == false
+            #     λ = λ_old
+            # end
         end
-        λ_alp = [prec_t*m_t,-0.5*prec_t]
-        # More organized code
-        m_prior = deepcopy(unsafeMean(msg_in.dist))
-        m_t = deepcopy(unsafeMean(msg_in.dist))
-        prec_prior = η[2]*-2.0
-        prec_t = deepcopy(unsafePrecision(msg_in.dist))
+        λ_cvi = λ
+    end
+    if flag_IBL
+        # Improved Bayesian Learning
+        df_z(z) = ForwardDiff.derivative(logp_nc,z) # Grad_z ∼ Gives ∇_μ
+        df_zz(z) = ForwardDiff.derivative(df_z,z) # Hessian_z ∼ 2*∇_Σ
+        η = deepcopy(bcParams(msg_in.dist)) # prior distribution nat. params
+        #TODO : Change λ definition to deepcopy(λ_init) where λ_init = BC params
+        λ = deepcopy(bcParams(msg_in.dist)) # q(z) nat. params
         for i=1:num_iterations
-            q = standardDist(msg_in.dist,λ)
+            #println("η =$η,β_t=$β_t,λ=$λ")
+            q = standardDist(msg_in.dist,[λ[1]*λ[2],-0.5*λ[2]])
             z_s = sample(q)
-            # grad + hessian for nonconj factor
-            g_i = df_m(z_s)
-            H_i = 2*df_v(z_s)
-            df_μ1 = (1/prec_t)*g_i+m_prior-m_t
-            df_μ2 = -H_i+prec_prior-prec_t
-            m_t += 0.1*df_μ1
-            prec_t += 0.1*df_μ2
-
+            # gradient and hessian of nonconj factor
+            g_i = df_z(z_s)
+            H_i = df_zz(z_s)
+            #TODO : Get Learning rate for λ[2] from any kind of optimizer
+            β_t = getfield(opt,:eta) #learning rate
+            df_μ1 = (1/λ[2])*g_i
+            df_μ2 = -H_i
+            ∇f = [df_μ1, df_μ2]
+            ∇ = λ .- η .- ∇f #[ĝ[1],ĝ[2]]
+            additional_term_g2=(0.5*β_t^2)*(∇[2]^2)/λ[2]
+            update!(opt,λ,∇)
+            λ[2] += additional_term_g2
         end
-        λ_alp2 = [prec_t*m_t,-0.5*prec_t]
+        λ = [λ[1]*λ[2],-0.5*λ[2]]
     end
-
-    # CVI Original w/ naturalParams
-    for i=1:num_iterations
-        q = standardDist(msg_in.dist,λ)
-        z_s = sample(q)
-        df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
-        df_μ2 = df_v(z_s)
-        ∇f = [df_μ1, df_μ2]
-        λ_old = deepcopy(λ)
-        ∇ = λ .- η .- ∇f
-        update!(opt,λ,∇)
-        if isProper(standardDist(msg_in.dist,λ)) == false
-            λ = λ_old
-        end
-    end
-    println("λ_alp = $λ_alp,λ_alp2 = $λ_alp2, λ_cvi = $λ")
-    #println(λ)
+    #println("λ_ibl = $λ_post, λ_cvi = $λ_cvi")
     return λ
-
 end
 
 function renderCVI(logp_nc::Function,
