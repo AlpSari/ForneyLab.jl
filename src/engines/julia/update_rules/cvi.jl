@@ -208,70 +208,117 @@ function renderCVI(logp_nc::Function,
                    opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent},
                    λ_init::Vector,
                    msg_in::Message{<:Gaussian, Univariate})
-    η = deepcopy(naturalParams(msg_in.dist))
-    λ = deepcopy(λ_init)
 
     df_m(z) = ForwardDiff.derivative(logp_nc,z)
     df_v(z) = 0.5*ForwardDiff.derivative(df_m,z)
 
     flag_alp = true
+    flag_same_samples = true
+    flag_init_print = false
     if flag_alp
-       # First Code
+       #CVI Params
+       η = deepcopy(naturalParams(msg_in.dist))
+       λ = deepcopy(λ_init)
+       # First Code Params
+       m_prior = deepcopy(unsafeMean(msg_in.dist))
+       m_t = deepcopy(unsafeMean(msg_in.dist))
        τ = η[2]*-2.0
-       m_prior = deepcopy(unsafeMean(msg_in.dist))
-
-       m_t = deepcopy(unsafeMean(msg_in.dist))
-       prec_t = deepcopy(unsafePrecision(msg_in.dist))
-       λ_alp = [prec_t*m_t,-0.5*prec_t]
-       for i=1:num_iterations
-           q = standardDist(msg_in.dist,λ_alp)
-           z_s = sample(q)
-           # grad + hessian for nonconj factor
-           g_i = df_m(z_s)
-           H_i = 2*df_v(z_s)
-           # updates (from Nat Grad CVI Eqn16-17 + p(z) deki meani hesaba kat)
-           m_t = m_t + 0.1*(1.0/prec_t)*(g_i+prec_t*(m_prior-m_t))
-           prec_t = prec_t+0.1*(τ-H_i-prec_t)
+       #prec_t = deepcopy(unsafePrecision(msg_in.dist))
+       Σ = deepcopy(unsafeVar(msg_in.dist))
+       S = 1/Σ-τ
+       λ_alp = [(1/Σ)*m_t,-0.5*(1/Σ)]
+       # Second Code Params
+       m_prior_2 = deepcopy(unsafeMean(msg_in.dist))
+       m_t_2 = deepcopy(unsafeMean(msg_in.dist))
+       prec_prior_2 = η[2]*-2.0
+       prec_t_2 = deepcopy(unsafePrecision(msg_in.dist))
+       λ_alp2 = [prec_t_2*m_t_2,-0.5*prec_t_2]
+       if flag_init_print
+           println("Initially: [m_t,prec_t] = [$m_t,$prec_t],[m_t_2,prec_t_2] = [$m_t_2,$prec_t_2], λ_cvi = $λ")
+           flag_init_print=false
+       end
+       if flag_same_samples
+           for i=1:num_iterations
+               #println("m_prior =$m_prior,Term = $(τ*m_prior)")
+               q = standardDist(msg_in.dist,λ)
+               z_s = sample(q)
+               # CVI Gradient (descent direction)
+               df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
+               df_μ2 = df_v(z_s)
+               ∇f = [df_μ1, df_μ2]
+               ∇ = λ .- η .- ∇f
+               # First code gradient (ascend direction)
+               g_i = df_m(z_s)
+               H_i = 2*df_v(z_s)
+               #∇_1 = [(1.0/prec_t)*(g_i+prec_t*(m_prior-m_t)),(τ-H_i-prec_t)]
+               S = 0.9*S+0.1*(-H_i)
+               Σ = 1/(S+τ)
+               m_t =m_t -0.1*Σ*(-g_i+τ*(m_t-m_prior))
+               λ_alp = [(1/Σ)*m_t,-0.5*(1/Σ)]
+               # Second code gradient (ascend direction)
+               g_i_2 = df_m(z_s)
+               H_i_2= 2*df_v(z_s)
+               ∇_2 = [(1/prec_t_2)*(g_i_2+prec_prior_2*(m_prior_2-m_t_2)),-H_i_2+prec_prior_2-prec_t_2]
+               # Update CVI
+               λ -= 0.1*∇
+               # Update first code params
+               # m_t += 0.1*∇_1[1]
+               # prec_t += 0.1*∇_1[2]
+               # λ_alp = [prec_t*m_t,-0.5*prec_t]
+               # Update second code params
+               #NOTE: PRECISION must be updated before MEAN for this scheme to work
+               #NOTE: This should be changed in Improved Bayesian Learning
+               prec_t_2 += 0.1*∇_2[2]
+               m_t_2 += 0.1*(1/prec_t_2)*(g_i_2+prec_prior_2*(m_prior_2-m_t_2))
+               λ_alp2 = [prec_t_2*m_t_2,-0.5*prec_t_2]
+           end
+       else
+           for i=1:num_iterations
+               q = standardDist(msg_in.dist,λ_alp)
+               z_s = sample(q)
+               # grad + hessian for nonconj factor
+               g_i = df_m(z_s)
+               H_i = 2*df_v(z_s)
+               # updates (from Nat Grad CVI Eqn16-17 + p(z) deki meani hesaba kat)
+               m_t = m_t + 0.1*(1.0/prec_t)*(g_i+prec_t*(m_prior-m_t))
+               prec_t = prec_t+0.1*(τ-H_i-prec_t)
+               λ_alp = [prec_t*m_t,-0.5*prec_t]
+               #m_t = m_t - 0.1*(1.0/prec_t)*(τ*m_t-g_i-m_prior)
+           end
            λ_alp = [prec_t*m_t,-0.5*prec_t]
-           #m_t = m_t - 0.1*(1.0/prec_t)*(τ*m_t-g_i-m_prior)
-       end
-       λ_alp = [prec_t*m_t,-0.5*prec_t]
-       # More organized code
-       m_prior = deepcopy(unsafeMean(msg_in.dist))
-       m_t = deepcopy(unsafeMean(msg_in.dist))
-       prec_prior = η[2]*-2.0
-       prec_t = deepcopy(unsafePrecision(msg_in.dist))
-       λ_alp2 = [prec_t*m_t,-0.5*prec_t]
-       for i=1:num_iterations
-           q = standardDist(msg_in.dist,λ_alp2)
+           # More organized code
+           for i=1:num_iterations
+               q_2 = standardDist(msg_in.dist,λ_alp2)
+               z_s_2 = sample(q_2)
+               # grad + hessian for nonconj factor
+               g_i_2 = df_m(z_s_2)
+               H_i_2= 2*df_v(z_s_2)
+               df_μ1_2 = (1/prec_t_2)*g_i_2+m_prior_2-m_t_2
+               df_μ2_2 = -H_i_2+prec_prior_2-prec_t_2
+               m_t_2 += 0.1*df_μ1_2
+               prec_t_2 += 0.1*df_μ2_2
+               λ_alp2 = [prec_t_2*m_t_2,-0.5*prec_t_2]
+
+           end
+           λ_alp2 = [prec_t_2*m_t_2,-0.5*prec_t_2]
+        end
+        # CVI Original w/ naturalParams
+        for i=1:num_iterations
+           q = standardDist(msg_in.dist,λ)
            z_s = sample(q)
-           # grad + hessian for nonconj factor
-           g_i = df_m(z_s)
-           H_i = 2*df_v(z_s)
-           df_μ1 = (1/prec_t)*g_i+m_prior-m_t
-           df_μ2 = -H_i+prec_prior-prec_t
-           m_t += 0.1*df_μ1
-           prec_t += 0.1*df_μ2
-           λ_alp2 = [prec_t*m_t,-0.5*prec_t]
-
+           df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
+           df_μ2 = df_v(z_s)
+           ∇f = [df_μ1, df_μ2]
+           λ_old = deepcopy(λ)
+           ∇ = λ .- η .- ∇f
+           update!(opt,λ,∇)
+           # if isProper(standardDist(msg_in.dist,λ)) == false
+           #     λ = λ_old
+           # end
+        end
        end
-       λ_alp2 = [prec_t*m_t,-0.5*prec_t]
-    end
 
-    # CVI Original w/ naturalParams
-    for i=1:num_iterations
-       q = standardDist(msg_in.dist,λ)
-       z_s = sample(q)
-       df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
-       df_μ2 = df_v(z_s)
-       ∇f = [df_μ1, df_μ2]
-       λ_old = deepcopy(λ)
-       ∇ = λ .- η .- ∇f
-       update!(opt,λ,∇)
-       if isProper(standardDist(msg_in.dist,λ)) == false
-           λ = λ_old
-       end
-    end
+
     println("λ_alp = $λ_alp,λ_alp2 = $λ_alp2, λ_cvi = $λ")
     #println(λ)
     return λ
