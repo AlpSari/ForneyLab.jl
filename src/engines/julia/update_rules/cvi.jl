@@ -222,8 +222,9 @@ function renderCVI(logp_nc::Function,
 
        m_t = deepcopy(unsafeMean(msg_in.dist))
        prec_t = deepcopy(unsafePrecision(msg_in.dist))
+       λ_alp = [prec_t*m_t,-0.5*prec_t]
        for i=1:num_iterations
-           q = standardDist(msg_in.dist,λ)
+           q = standardDist(msg_in.dist,λ_alp)
            z_s = sample(q)
            # grad + hessian for nonconj factor
            g_i = df_m(z_s)
@@ -231,6 +232,7 @@ function renderCVI(logp_nc::Function,
            # updates (from Nat Grad CVI Eqn16-17 + p(z) deki meani hesaba kat)
            m_t = m_t + 0.1*(1.0/prec_t)*(g_i+prec_t*(m_prior-m_t))
            prec_t = prec_t+0.1*(τ-H_i-prec_t)
+           λ_alp = [prec_t*m_t,-0.5*prec_t]
            #m_t = m_t - 0.1*(1.0/prec_t)*(τ*m_t-g_i-m_prior)
        end
        λ_alp = [prec_t*m_t,-0.5*prec_t]
@@ -239,8 +241,9 @@ function renderCVI(logp_nc::Function,
        m_t = deepcopy(unsafeMean(msg_in.dist))
        prec_prior = η[2]*-2.0
        prec_t = deepcopy(unsafePrecision(msg_in.dist))
+       λ_alp2 = [prec_t*m_t,-0.5*prec_t]
        for i=1:num_iterations
-           q = standardDist(msg_in.dist,λ)
+           q = standardDist(msg_in.dist,λ_alp2)
            z_s = sample(q)
            # grad + hessian for nonconj factor
            g_i = df_m(z_s)
@@ -249,6 +252,7 @@ function renderCVI(logp_nc::Function,
            df_μ2 = -H_i+prec_prior-prec_t
            m_t += 0.1*df_μ1
            prec_t += 0.1*df_μ2
+           λ_alp2 = [prec_t*m_t,-0.5*prec_t]
 
        end
        λ_alp2 = [prec_t*m_t,-0.5*prec_t]
