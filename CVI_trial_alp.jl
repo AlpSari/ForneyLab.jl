@@ -44,8 +44,8 @@ graph = FactorGraph()
 
 f(x) = x
 
-@RV x ~ GaussianMeanVariance(2.,1.)
-@RV x_ ~ Cvi(x,g=f,opt=Descent(0.1),num_samples=1000,num_iterations=100)
+@RV x ~ GaussianMeanVariance(0.,1.)
+@RV x_ ~ Cvi(x,g=f,opt=Descent(0.9),num_samples=1000,num_iterations=100)
 @RV w ~ Gamma(2.,3.5)
 @RV y ~ GaussianMeanPrecision(x_,w)
 
