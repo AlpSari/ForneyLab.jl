@@ -58,7 +58,7 @@ f(x) = x
 # Priors
 graph2 = FactorGraph()
 @RV m ~ GaussianMeanVariance(0.0, 100.0)
-@RV m_bar ~ Cvi(m,g=f,opt=Descent(3),num_samples=1000,num_iterations=100)
+@RV m_bar ~ Cvi(m,g=f,opt=Descent(0.99),num_samples=1000,num_iterations=100)
 @RV w ~ Gamma(0.01, 0.01)
 
 # Observarion model

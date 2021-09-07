@@ -213,93 +213,59 @@ function renderCVI(logp_nc::Function,
     df_v(z) = 0.5*ForwardDiff.derivative(df_m,z)
 
     flag_alp = true
-    flag_improper_alp = false
     flag_improper_cvi = false
+    # TODO : Remove flag_alp after checking IBL implementation's stability
+    # TODO : Get λ_init as BCN  parametrization eventually
+    # TODO : Get step size from ANY optimizer, not just Descent
     if flag_alp
-       #CVI Params
-       η = deepcopy(naturalParams(msg_in.dist))
-       λ = deepcopy(λ_init)
-       # First Code Params
-       m_prior = deepcopy(unsafeMean(msg_in.dist))
-       m_t = deepcopy(unsafeMean(msg_in.dist))
-       prec_prior = η[2]*-2.0
-       prec_t = deepcopy(unsafePrecision(msg_in.dist))
-       λ_alp = [prec_t*m_t,-0.5*prec_t]
-       # Second Code Params
-       m_prior_2 = deepcopy(unsafeMean(msg_in.dist))
-       m_t_2 = deepcopy(unsafeMean(msg_in.dist))
-       prec_prior_2 = η[2]*-2.0
-       prec_t_2 = deepcopy(unsafePrecision(msg_in.dist))
-       β_t = getfield(opt,:eta)
-       λ_alp2 = [prec_t_2*m_t_2,-0.5*prec_t_2]
-       # CVI with [μ,S]
-       for i=1:num_iterations
-           q = standardDist(msg_in.dist,λ_alp)
-           z_s = sample(q)
-           # grad + hessian for nonconj factor
-           λ_alp_old = deepcopy(λ_alp)
-           g_i = df_m(z_s)
-           H_i= 2*df_v(z_s)
-           # Update S
-           g_μ_2= -H_i+prec_prior-prec_t
-           prec_t += β_t*g_μ_2
-           # Update μ
-           g_μ_1 = (1/prec_t)*(g_i+prec_prior*(m_prior-m_t))
-           m_t += β_t*g_μ_1
-           λ_alp = [prec_t*m_t,-0.5*prec_t]
-           if isProper(standardDist(msg_in.dist,λ_alp)) == false
-               λ_alp = λ_alp_old
-               prec_t = -2.0*λ_alp[2]
-               m_t = λ_alp[1]/prec_t
-               flag_improper_alp = true
-           end
-       end
-       # IBL with [μ,S]
-       for i=1:num_iterations
-           q = standardDist(msg_in.dist,λ_alp2)
-           z_s = sample(q)
-           # grad + hessian for nonconj factor
-           g_i_2 = df_m(z_s)
-           H_i_2= 2*df_v(z_s)
-           # Update S using CVI
-           g_μ_1 = (1/prec_t_2)*(g_i_2+prec_prior_2*(m_prior_2-m_t_2))
-           g_μ_2= -H_i_2+prec_prior_2-prec_t_2
-           #prec_temp = deepcopy(prec_t_2)
-           m_t_2 += β_t*g_μ_1
-           prec_t_2 += β_t*g_μ_2+0.5*(β_t*g_μ_2)^2/prec_t_2
-           # Update μ using CVI
-
-
-           # Add additional term of S for IBL
-           #prec_t_2+=0.5*(β_t*g_μ_2)^2/prec_temp
-
-           λ_alp2 = [prec_t_2*m_t_2,-0.5*prec_t_2]
-       end
-       # CVI with naturalParams [μS,-0.5S]
-       for i=1:num_iterations
-          q = standardDist(msg_in.dist,λ)
-          z_s = sample(q)
-          df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
-          df_μ2 = df_v(z_s)
-          ∇f = [df_μ1, df_μ2]
-          λ_old = deepcopy(λ)
-          ∇ = λ .- η .- ∇f
-          update!(opt,λ,∇)
+        β_t = getfield(opt,:eta)
+        m_prior_2 = deepcopy(unsafeMean(msg_in.dist))
+        prec_prior_2 = deepcopy(unsafePrecision(msg_in.dist))
+        prec_t_2 = deepcopy(-2*λ_init[2])
+        m_t_2 = deepcopy(λ_init[1]/prec_t_2)
+        λ_ibl = [prec_t_2*m_t_2,-0.5*prec_t_2]
+        # IBL with [μ,S]
+        for i=1:num_iterations
+            q = standardDist(msg_in.dist,λ_ibl)
+            z_s = sample(q)
+            g_i_2 = df_m(z_s)
+            H_i_2= 2*df_v(z_s)
+            # Compute natural gradients of BCN parametrization
+            g_μ_1 = (1/prec_t_2)*(g_i_2+prec_prior_2*(m_prior_2-m_t_2))
+            g_μ_2= -H_i_2+prec_prior_2-prec_t_2
+            # Update [μ,S]
+            m_t_2 += β_t*g_μ_1
+            prec_t_2 += β_t*g_μ_2+0.5*(β_t*g_μ_2)^2/prec_t_2
+            λ_ibl = [prec_t_2*m_t_2,-0.5*prec_t_2]
+        end
+    println("λ_ibl = $λ_ibl")
+    println("μ_ibl = $(-0.5*λ_ibl[1]/λ_ibl[2])")
+    return λ_ibl
+    else
+        global flag_improper_cvi
+        #CVI Params
+        η = deepcopy(naturalParams(msg_in.dist))
+        λ = deepcopy(λ_init)
+        # CVI with naturalParams [μS,-0.5S]
+        for i=1:num_iterations
+            q = standardDist(msg_in.dist,λ)
+            z_s = sample(q)
+            df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
+            df_μ2 = df_v(z_s)
+            ∇f = [df_μ1, df_μ2]
+            λ_old = deepcopy(λ)
+            ∇ = λ .- η .- ∇f
+            update!(opt,λ,∇)
           if isProper(standardDist(msg_in.dist,λ)) == false
-              λ = λ_old
-              flag_improper_cvi = true
+            λ = λ_old
+            flag_improper_cvi = true
           end
        end
-
-
-
-       end
-    println("λ_alp = $λ_alp,λ_alp2 = $λ_alp2, λ_cvi = $λ")
-    println("Improper_λ_alp=$flag_improper_alp,Improper_λ_cvi=$flag_improper_cvi,")
-    println("μ_alp = $(-0.5*λ_alp[1]/λ_alp[2]),μ_alp2 = $(-0.5*λ_alp2[1]/λ_alp2[2]),μ_cvi = $(-0.5*λ[1]/λ[2])")
-    #println(λ)
+    println("λ_cvi = $λ")
+    println("Improper_λ_cvi=$flag_improper_cvi")
+    println("μ_cvi = $(-0.5*λ[1]/λ[2])")
     return λ
-
+    end
 end
 
 function renderCVI(logp_nc::Function,
