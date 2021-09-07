@@ -262,14 +262,16 @@ function renderCVI(logp_nc::Function,
            g_i_2 = df_m(z_s)
            H_i_2= 2*df_v(z_s)
            # Update S using CVI
-           g_μ_2= -H_i_2+prec_prior_2-prec_t_2
-           prec_temp = deepcopy(prec_t_2)
-           prec_t_2 += β_t*g_μ_2#+0.5*(β_t*g_μ_2)^2/prec_t_2
-           # Update μ using CVI
            g_μ_1 = (1/prec_t_2)*(g_i_2+prec_prior_2*(m_prior_2-m_t_2))
+           g_μ_2= -H_i_2+prec_prior_2-prec_t_2
+           #prec_temp = deepcopy(prec_t_2)
            m_t_2 += β_t*g_μ_1
+           prec_t_2 += β_t*g_μ_2+0.5*(β_t*g_μ_2)^2/prec_t_2
+           # Update μ using CVI
+
+
            # Add additional term of S for IBL
-           prec_t_2+=0.5*(β_t*g_μ_2)^2/prec_temp
+           #prec_t_2+=0.5*(β_t*g_μ_2)^2/prec_temp
 
            λ_alp2 = [prec_t_2*m_t_2,-0.5*prec_t_2]
        end
