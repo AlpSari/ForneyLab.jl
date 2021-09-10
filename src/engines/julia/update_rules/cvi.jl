@@ -202,6 +202,20 @@ end
 #     ProbabilityDistribution(Multivariate, GaussianWeightedMeanPrecision,xi=XI,w=W)
 # end
 
+# function get_beta(Opt::Descent,x_new,x_old,g)
+#     beta = getfield(Opt,:eta)
+# end
+# function get_beta(Opt::AbstractOptimizer,x_new,x_old,g)
+#     n  = length(size(x_new))
+#     if n >1
+#         x_new_vec = deepcopy(vec(x_new))
+#         x_old_vec = deepcopy(vec(x_old))
+#         g_vec = deepcopy(g)
+#         beta = ((x_new_vec.-x_old_vec)./(g_vec))
+#     else
+#         beta = ((x_new_vec.-x_old_vec)./(g_vec))
+#     end
+# end
 
 function renderCVI(logp_nc::Function,
                    num_iterations::Int,
@@ -229,26 +243,35 @@ function renderCVI(logp_nc::Function,
         for i=1:num_iterations
             q = standardDist(msg_in.dist,λ_ibl)
             z_s = sample(q)
-            g_i_2 = df_m(z_s)
-            H_i_2= 2*df_v(z_s)
+            g_i = df_m(z_s)
+            H_i= 2*df_v(z_s)
             # Compute natural gradients of BCN parametrization
-            g_μ_1 = (1/prec_t)*(g_i_2+prec_prior*(m_prior-m_t))
-            g_μ_2= -H_i_2+prec_prior-prec_t
-            # Update [μ,S]
-            m_t += β_t*g_μ_1
-            prec_t += β_t*g_μ_2+0.5*(β_t*g_μ_2)^2/prec_t
+            if i >0
+                g_μ_1 = (1/prec_t)*(g_i+prec_prior*(m_prior-m_t))
+                g_μ_2= -H_i+prec_prior-prec_t
+                m_t += β_t*g_μ_1
+                prec_t += β_t*g_μ_2+0.5*(β_t*g_μ_2)^2/prec_t
+            else
+                g_μ_2= -H_i+prec_prior-prec_t
+                prec_t += β_t*g_μ_2+0.5*(β_t*g_μ_2)^2/prec_t
+                g_μ_1 = (1/prec_t)*(g_i+prec_prior*(m_prior-m_t))
+                m_t += β_t*g_μ_1
+            end
+            # g̃ = [g_μ_1;g_μ_2]
+            # m_t += β_t*g_μ_1
+            # prec_t += β_t*g_μ_2+0.5*(β_t*g_μ_2)^2/prec_t
             λ_ibl = [prec_t*m_t,-0.5*prec_t]
         end
-    println("λ_ibl = $λ_ibl")
-    println("μ_ibl = $(-0.5*λ_ibl[1]/λ_ibl[2])")
-    return λ_ibl
-    else
-        global flag_improper_cvi
+        println("λ_ibl = $λ_ibl")
+        println("μ_ibl = $(-0.5*λ_ibl[1]/λ_ibl[2])")
+        #return λ_ibl
+        #else
         #CVI Params
         η = deepcopy(naturalParams(msg_in.dist))
         λ = deepcopy(λ_init)
         # CVI with naturalParams [μS,-0.5S]
         for i=1:num_iterations
+            global flag_improper_cvi
             q = standardDist(msg_in.dist,λ)
             z_s = sample(q)
             df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
@@ -257,16 +280,16 @@ function renderCVI(logp_nc::Function,
             λ_old = deepcopy(λ)
             ∇ = λ .- η .- ∇f
             update!(opt,λ,∇)
-          if isProper(standardDist(msg_in.dist,λ)) == false
-            λ = λ_old
-            flag_improper_cvi = true
-          end
-       end
-    println("λ_cvi = $λ")
-    println("Improper_λ_cvi=$flag_improper_cvi")
-    println("μ_cvi = $(-0.5*λ[1]/λ[2])")
-    return λ
+            if isProper(standardDist(msg_in.dist,λ)) == false
+                λ = λ_old
+                flag_improper_cvi = true
+            end
+        end
+        println("λ_cvi = $λ")
+        println("Improper_λ_cvi=$flag_improper_cvi")
+        println("μ_cvi = $(-0.5*λ[1]/λ[2])")
     end
+    return λ
 end
 
 function renderCVI(logp_nc::Function,
@@ -287,7 +310,6 @@ function renderCVI(logp_nc::Function,
     # CVI
     η = deepcopy(naturalParams(msg_in.dist))
     λ = deepcopy(λ_init)
-
     # IBL
     n = dims(msg_in.dist)
     β_t = getfield(opt,:eta)
@@ -301,12 +323,12 @@ function renderCVI(logp_nc::Function,
         for i=1:num_iterations
             q = standardDist(msg_in.dist,λ_ibl)
             z_s = sample(q)
-            g_i_2 = df_m(z_s)
-            H_i_2= 2*df_v(z_s)
+            g_i = df_m(z_s)
+            H_i= 2*df_v(z_s)
             # Compute natural gradients of BCN parametrization
             s_inv = deepcopy(cholinv(prec_t))
-            g_μ_1 = s_inv*(g_i_2+prec_prior*(m_prior-m_t))
-            g_μ_2= -H_i_2+prec_prior-prec_t
+            g_μ_1 = s_inv*(g_i+prec_prior*(m_prior-m_t))
+            g_μ_2= -H_i+prec_prior-prec_t
             m_t += β_t*g_μ_1
             prec_t += β_t*g_μ_2+0.5*(β_t)^2*g_μ_2*s_inv*g_μ_2
             λ_ibl = [prec_t*m_t;vec(-0.5*prec_t)]

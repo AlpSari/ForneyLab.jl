@@ -3,14 +3,14 @@ using Random,LinearAlgebra, Flux.Optimise, Plots, ForneyLab
 # VMP Without CVI NODE
 # Generate toy data set
 Random.seed!(1234);
-n = 5
+n = 50
 m_data = 3.0
 w_data = 4.0
 y_data = sqrt(1/w_data)*randn(n) .+ m_data;
 g = FactorGraph()
 
 # Priors
-@RV m ~ GaussianMeanVariance(0.0, 1.)
+@RV m ~ GaussianMeanVariance(0.0, 100.0)
 @RV w ~ Gamma(0.01, 0.01)
 
 # Observarion model
@@ -58,7 +58,7 @@ f(x) = x
 # Priors
 graph2 = FactorGraph()
 @RV m ~ GaussianMeanVariance(0.0, 100.0)
-@RV m_bar ~ Cvi(m,g=f,opt=Descent(0.99),num_samples=1000,num_iterations=100)
+@RV m_bar ~ Cvi(m,g=f,opt=Descent(0.2),num_samples=1000,num_iterations=100)
 @RV w ~ Gamma(0.01, 0.01)
 
 # Observarion model
