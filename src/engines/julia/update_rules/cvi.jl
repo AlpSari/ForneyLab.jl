@@ -176,46 +176,29 @@ end
 # CVI implementations
 #---------------------------
 
-
-# # TODO: Make λ_init in renderCVI functions BCN parameters
-# # TODO: Test all functions defined here
-# # Standard parameters to BC parameters
-# bcParams(dist::ProbabilityDistribution{Univariate, F}) where F<:Gaussian = [unsafeMean(dist),unsafePrecision(dist)]
-# bcParams(dist::ProbabilityDistribution{Multivariate, F}) where F<:Gaussian = [vec(unsafeMean(dist)); vec(unsafePrecision(dist))]
-# # BC parameters to Natural parameters
-# function bcToNaturalParams(dist::ProbabilityDistribution{Univariate, F}, η::Vector) where F<:Gaussian
-#     λ = [η[1]*η[2],-0.5*η[2]]
-# end
-# function bcToNaturalParams(dist::ProbabilityDistribution{Multivariate, F}, η::Vector) where F<:Gaussian
-#     d = dims(dist)
-#     λ=[η[1:d].*η[d+1:end];-0.5*η[d+1:end]]
-# end
-# # BC parameters to standard dist. type
-# function bcTostandardDist(dist::ProbabilityDistribution{Univariate, F}, η::Vector) where F<:Gaussian
-#     ProbabilityDistribution(Univariate, GaussianWeightedMeanPrecision,xi=η[1]*η[2],w=η[2])
-# end
-#
-# function bcTostandardDist(dist::ProbabilityDistribution{Multivariate, F}, η::Vector) where F<:Gaussian
-#     d = dims(dist)
-#     XI, W = η[d+1:end].*η[1:d], reshape(η[d+1:end],d,d)
-#     W = Matrix(Hermitian(W + tiny*diageye(d))) # Ensure precision is always invertible
-#     ProbabilityDistribution(Multivariate, GaussianWeightedMeanPrecision,xi=XI,w=W)
-# end
-
-# function get_beta(Opt::Descent,x_new,x_old,g)
-#     beta = getfield(Opt,:eta)
-# end
-# function get_beta(Opt::AbstractOptimizer,x_new,x_old,g)
-#     n  = length(size(x_new))
-#     if n >1
-#         x_new_vec = deepcopy(vec(x_new))
-#         x_old_vec = deepcopy(vec(x_old))
-#         g_vec = deepcopy(g)
-#         beta = ((x_new_vec.-x_old_vec)./(g_vec))
-#     else
-#         beta = ((x_new_vec.-x_old_vec)./(g_vec))
-#     end
-# end
+# Additional definitions for iBLR implementation of CVI
+mutable struct iBLR
+    eta::Float64
+    state::Int64
+end
+iBLR()=iBLR(0.1,0)
+iBLR(eta::F) where F <: Number = iBLR(eta,0)
+bcParams(dist::ProbabilityDistribution{Univariate, F}) where F<:Gaussian = [unsafeMean(dist),unsafePrecision(dist)]
+bcParams(dist::ProbabilityDistribution{Multivariate, F}) where F<:Gaussian = [vec(unsafeMean(dist)); vec(unsafePrecision(dist))]
+function bcToStandardDist(dist::ProbabilityDistribution{Univariate, F}, η::Vector) where F<:Gaussian
+    ProbabilityDistribution(Univariate, GaussianWeightedMeanPrecision,xi=η[2]*η[1],w=η[2])
+end
+function bcToNaturalParams(dist::ProbabilityDistribution{Univariate, F}, η::Vector) where F<:Gaussian
+    λ = [η[2]*η[1],-0.5*η[2]]
+end
+function bcToStandardDist(dist::ProbabilityDistribution{Multivariate, F}, η::Vector) where F<:Gaussian
+    #TODO: CHECK if tiny should be added before XI definition
+    d = dims(dist)
+    W = reshape(η[d+1:end],d,d)
+    XI = W*η[1:d]
+    W = Matrix(Hermitian(W + tiny*diageye(d))) # Ensure precision is always invertible
+    ProbabilityDistribution(Multivariate, GaussianWeightedMeanPrecision,xi=XI,w=W)
+end
 
 function renderCVI(logp_nc::Function,
                    num_iterations::Int,
@@ -225,71 +208,108 @@ function renderCVI(logp_nc::Function,
 
     df_m(z) = ForwardDiff.derivative(logp_nc,z)
     df_v(z) = 0.5*ForwardDiff.derivative(df_m,z)
-
-    flag_alp = true
-    flag_improper_cvi = false
-    # TODO : Remove flag_alp after checking IBL implementation's stability
-    # TODO : Get λ_init as BCN  parametrization eventually
-    # TODO : Get step size from ANY optimizer, not just Descent
-    # TODO : This code gives error if precision-> NaN or Inf or unstable step sz
-    if flag_alp
-        β_t = getfield(opt,:eta)
-        m_prior = deepcopy(unsafeMean(msg_in.dist))
-        prec_prior = deepcopy(unsafePrecision(msg_in.dist))
-        prec_t = deepcopy(-2*λ_init[2])
-        m_t = deepcopy(λ_init[1]/prec_t)
-        λ_ibl = [prec_t*m_t,-0.5*prec_t]
-        # IBL with [μ,S]
-        for i=1:num_iterations
-            q = standardDist(msg_in.dist,λ_ibl)
-            z_s = sample(q)
-            g_i = df_m(z_s)
-            H_i= 2*df_v(z_s)
-            # Compute natural gradients of BCN parametrization
-            if i >0
-                g_μ_1 = (1/prec_t)*(g_i+prec_prior*(m_prior-m_t))
-                g_μ_2= -H_i+prec_prior-prec_t
-                m_t += β_t*g_μ_1
-                prec_t += β_t*g_μ_2+0.5*(β_t*g_μ_2)^2/prec_t
-            else
-                g_μ_2= -H_i+prec_prior-prec_t
-                prec_t += β_t*g_μ_2+0.5*(β_t*g_μ_2)^2/prec_t
-                g_μ_1 = (1/prec_t)*(g_i+prec_prior*(m_prior-m_t))
-                m_t += β_t*g_μ_1
-            end
-            # g̃ = [g_μ_1;g_μ_2]
-            # m_t += β_t*g_μ_1
-            # prec_t += β_t*g_μ_2+0.5*(β_t*g_μ_2)^2/prec_t
-            λ_ibl = [prec_t*m_t,-0.5*prec_t]
+    η = deepcopy(naturalParams(msg_in.dist))
+    λ = deepcopy(λ_init)
+    # CVI with naturalParams [μS,-0.5S]
+    for i=1:num_iterations
+        q = standardDist(msg_in.dist,λ)
+        z_s = sample(q)
+        df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
+        df_μ2 = df_v(z_s)
+        ∇f = [df_μ1, df_μ2]
+        λ_old = deepcopy(λ)
+        ∇ = λ .- η .- ∇f
+        update!(opt,λ,∇)
+        if isProper(standardDist(msg_in.dist,λ)) == false
+            λ = λ_old
         end
-        println("λ_ibl = $λ_ibl")
-        println("μ_ibl = $(-0.5*λ_ibl[1]/λ_ibl[2])")
-        #return λ_ibl
-        #else
-        #CVI Params
-        η = deepcopy(naturalParams(msg_in.dist))
-        λ = deepcopy(λ_init)
-        # CVI with naturalParams [μS,-0.5S]
-        for i=1:num_iterations
-            global flag_improper_cvi
-            q = standardDist(msg_in.dist,λ)
-            z_s = sample(q)
-            df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
-            df_μ2 = df_v(z_s)
-            ∇f = [df_μ1, df_μ2]
-            λ_old = deepcopy(λ)
-            ∇ = λ .- η .- ∇f
-            update!(opt,λ,∇)
-            if isProper(standardDist(msg_in.dist,λ)) == false
-                λ = λ_old
-                flag_improper_cvi = true
-            end
-        end
-        println("λ_cvi = $λ")
-        println("Improper_λ_cvi=$flag_improper_cvi")
-        println("μ_cvi = $(-0.5*λ[1]/λ[2])")
     end
     return λ
+end
+function renderCVI(logp_nc::Function,
+                   num_iterations::Int,
+                   opt::iBLR,
+                   λ_init::Vector,
+                   msg_in::Message{<:Gaussian, Univariate})
+
+    """
+    improved Bayesian Learning Rule implementation for CVI node
+        BC Parameters are mean and precision(=[μ,S]) for Gaussian
+    """
+
+    df_m(z) = ForwardDiff.derivative(logp_nc,z)
+    df_H(z) = ForwardDiff.derivative(df_m,z)
+    #
+    β_t = getfield(opt,:eta) # Step size / Learning rate
+    η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
+    λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
+    λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
+    λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+    λ_iblr_stable = deepcopy(λ_iblr)
+    for i=1:num_iterations
+
+        q = bcToStandardDist(msg_in.dist,λ_iblr)
+        z_s = sample(q)
+        g_i = df_m(z_s)
+        H_i=  df_H(z_s)
+        if isnan(g_i) || isinf(g_i) || isnan(H_i) || isinf(H_i)
+            λ_iblr = λ_iblr_stable
+            continue
+        else
+            λ_iblr_stable = deepcopy(λ_iblr)
+        end
+
+        # Compute natural gradients of BC parametrization
+        g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
+        g_μ_2= -H_i+η[2]-λ_iblr[2]
+        #Update BC parameters
+        λ_iblr[1] += β_t*g_μ_1
+        λ_iblr[2] += β_t*g_μ_2+0.5*(β_t*g_μ_2)^2/λ_iblr[2]
+        # if isProper(bcToStandardDist(msg_in.dist,λ_iblr)) == false
+        #     λ_iblr = λ_iblr_copy
+        # end
+    end
+    λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
+    return λ_natural_posterior
+end
+
+function renderCVI(logp_nc::Function,
+                   num_iterations::Int,
+                   opt::iBLR,
+                   λ_init::Vector,
+                   msg_in::Message{<:Gaussian, Multivariate})
+
+    df_m(z) = ForwardDiff.gradient(logp_nc,z)
+    df_H(z) = ForwardDiff.jacobian(df_m,z)
+
+    # λ_init are Natural Parameters for MV Gaussian
+    n = dims(msg_in.dist)
+    β_t = getfield(opt,:eta)
+    m_prior = deepcopy(unsafeMean(msg_in.dist))
+    S_prior = deepcopy(unsafePrecision(msg_in.dist))
+    S_t = deepcopy(reshape(-2*λ_init[n+1:end],n,n))
+    m_t = deepcopy(S_t*λ_init[1:n])
+    for i=1:num_iterations
+        q = bcToStandardDist(msg_in.dist,[m_t;vec(S_t)])
+        z_s = sample(q)
+        g_i = df_m(z_s)
+        H_i = df_H(z_s)
+        m_t_old = deepcopy(m_t)
+        S_t_old = deepcopy(S_t)
+        # Compute natural gradients of BCN parametrization
+        s_inv = deepcopy(cholinv(S_t))
+        g_μ_1 = s_inv*(g_i+S_prior*(m_prior-m_t))
+        g_μ_2= -H_i+S_prior-S_t
+        # Update [μ,S]
+        m_t += β_t*g_μ_1
+        S_t += β_t*g_μ_2+0.5*(β_t)^2*g_μ_2*s_inv*g_μ_2
+        if isProper(bcToStandardDist(msg_in.dist,[m_t;vec(S_t)])) == false
+            m_t = m_t_old
+            S_t = S_t_old
+        end
+    end
+    λ_natural_posterior = [S_t*m_t;vec(-0.5*S_t)]
+    return λ_natural_posterior
 end
 
 function renderCVI(logp_nc::Function,
@@ -300,58 +320,24 @@ function renderCVI(logp_nc::Function,
 
     df_m(z) = ForwardDiff.gradient(logp_nc,z)
     df_v(z) = 0.5*ForwardDiff.jacobian(df_m,z)
-
-    #Select algorithm
-    # TODO : Remove flag_alp after checking IBL implementation's stability
-    # TODO : Get λ_init as BCN  parametrization eventually
-    # TODO : Get step size from ANY optimizer, not just Descent
-    # TODO : This code gives error if precision-> NaN or Inf or unstable step sz
-    flag_alp = true
     # CVI
     η = deepcopy(naturalParams(msg_in.dist))
     λ = deepcopy(λ_init)
-    # IBL
-    n = dims(msg_in.dist)
-    β_t = getfield(opt,:eta)
-    m_prior = deepcopy(unsafeMean(msg_in.dist))
-    prec_prior = deepcopy(unsafePrecision(msg_in.dist))
-    prec_t = deepcopy(reshape(-2*λ_init[n+1:end],n,n))
-    m_t = deepcopy(prec_t*λ_init[1:n])
-    λ_ibl = [prec_t*m_t;vec(-0.5*prec_t)]
-    if flag_alp
-        # IBL
-        for i=1:num_iterations
-            q = standardDist(msg_in.dist,λ_ibl)
-            z_s = sample(q)
-            g_i = df_m(z_s)
-            H_i= 2*df_v(z_s)
-            # Compute natural gradients of BCN parametrization
-            s_inv = deepcopy(cholinv(prec_t))
-            g_μ_1 = s_inv*(g_i+prec_prior*(m_prior-m_t))
-            g_μ_2= -H_i+prec_prior-prec_t
-            m_t += β_t*g_μ_1
-            prec_t += β_t*g_μ_2+0.5*(β_t)^2*g_μ_2*s_inv*g_μ_2
-            λ_ibl = [prec_t*m_t;vec(-0.5*prec_t)]
-            #println(size(λ_ibl))
+    # CVI
+    for i=1:num_iterations
+        q = standardDist(msg_in.dist,λ)
+        z_s = sample(q)
+        df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
+        df_μ2 = df_v(z_s)
+        ∇f = [df_μ1; vec(df_μ2)]
+        λ_old = deepcopy(λ)
+        ∇ = λ .- η .- ∇f
+        update!(opt,λ,∇)
+        if isProper(standardDist(msg_in.dist,λ)) == false
+            λ = λ_old
         end
-        return λ_ibl
-    else
-        # CVI
-        for i=1:num_iterations
-            q = standardDist(msg_in.dist,λ)
-            z_s = sample(q)
-            df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
-            df_μ2 = df_v(z_s)
-            ∇f = [df_μ1; vec(df_μ2)]
-            λ_old = deepcopy(λ)
-            ∇ = λ .- η .- ∇f
-            update!(opt,λ,∇)
-            if isProper(standardDist(msg_in.dist,λ)) == false
-                λ = λ_old
-            end
-        end
-        return λ
     end
+    return λ
 end
 
 function renderCVI(logp_nc::Function,
