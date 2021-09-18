@@ -180,9 +180,11 @@ end
 mutable struct iBLR
     eta::Float64
     state::Int64
+    stable_params::Any
 end
-iBLR()=iBLR(0.1,0)
-iBLR(eta::F) where F <: Number = iBLR(eta,0)
+iBLR()=iBLR(0.1,0,nothing)
+iBLR(eta::F) where F <: Number = iBLR(eta,0,nothing)
+iBLR(eta,state) = iBLR(eta,state,nothing)
 bcParams(dist::ProbabilityDistribution{Univariate, F}) where F<:Gaussian = [unsafeMean(dist),unsafePrecision(dist)]
 bcParams(dist::ProbabilityDistribution{Multivariate, F}) where F<:Gaussian = [vec(unsafeMean(dist)); vec(unsafePrecision(dist))]
 function bcToStandardDist(dist::ProbabilityDistribution{Univariate, F}, η::Vector) where F<:Gaussian
@@ -199,6 +201,61 @@ function bcToStandardDist(dist::ProbabilityDistribution{Multivariate, F}, η::Ve
     W = Matrix(Hermitian(W + tiny*diageye(d))) # Ensure precision is always invertible
     ProbabilityDistribution(Multivariate, GaussianWeightedMeanPrecision,xi=XI,w=W)
 end
+function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
+    #params = [μ,S]
+    if any(isnan.(natgrad)) || any(isinf.(natgrad))
+        # Gradients are non-numeric
+        if opt.state == 1 # Return to previous parameters which give numeric g̃
+            params = deepcopy(opt.stable_params)
+        end
+        return # no update
+    else
+        # Gradients are numeric
+        if opt.state ==1
+            opt.stable_params = deepcopy(params)
+        end
+    end
+    params[1] += opt.eta*natgrad[1]
+    params[2] += opt.eta*natgrad[2]+0.5*(opt.eta*natgrad[2])^2/params[2]
+
+    if isProper(bcToStandardDist(prior,params)) == false
+        # not proper after update
+        if opt.state == 1
+            params = deepcopy(opt.stable_params)
+        end
+    end
+end
+function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Multivariate, F},s_inv::Array{Float64,2}) where F <: Gaussian
+    #params = [vec(μ),mat(S)]
+    any_nan_value = any(any.((x->isnan.(x)).(natgrad)))
+    any_inf_value = any(any.((x->isinf.(x)).(natgrad)))
+    if any_nan_value || any_inf_value
+        # Gradients are non-numeric
+        if opt.state == 1 # Return to previous parameters which give numeric g̃
+            params = deepcopy(opt.stable_params)
+        end
+        return # no update
+    else
+        # Gradients are numeric
+        if opt.state ==1
+            opt.stable_params = deepcopy(params)
+        end
+    end
+
+    params[1] += opt.eta*natgrad[1]
+    params[2] += opt.eta*natgrad[2]+0.5*(opt.eta)^2*natgrad[2]*s_inv*natgrad[2]
+
+    if isProper(bcToStandardDist(prior,[params[1];vec(params[2])])) == false
+        # not proper after update
+        if opt.state == 1
+            params = deepcopy(opt.stable_params)
+        end
+    end
+end
+function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Multivariate, F}) where F <: Gaussian
+    s_inv = deepcopy(cholinv(params[2]))
+    update!(opt,params,natgrad,prior,s_inv)
+end
 
 function renderCVI(logp_nc::Function,
                    num_iterations::Int,
@@ -208,6 +265,7 @@ function renderCVI(logp_nc::Function,
 
     df_m(z) = ForwardDiff.derivative(logp_nc,z)
     df_v(z) = 0.5*ForwardDiff.derivative(df_m,z)
+    #F(z,) = -(logp_nc(z)-KL(q||p))
     η = deepcopy(naturalParams(msg_in.dist))
     λ = deepcopy(λ_init)
     # CVI with naturalParams [μS,-0.5S]
@@ -226,6 +284,7 @@ function renderCVI(logp_nc::Function,
     end
     return λ
 end
+
 function renderCVI(logp_nc::Function,
                    num_iterations::Int,
                    opt::iBLR,
@@ -239,35 +298,21 @@ function renderCVI(logp_nc::Function,
 
     df_m(z) = ForwardDiff.derivative(logp_nc,z)
     df_H(z) = ForwardDiff.derivative(df_m,z)
-    #
-    β_t = getfield(opt,:eta) # Step size / Learning rate
+
     η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
     λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
     λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
     λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
-    λ_iblr_stable = deepcopy(λ_iblr)
+    opt.stable_params = deepcopy(λ_iblr) # initialize stable point
     for i=1:num_iterations
-
         q = bcToStandardDist(msg_in.dist,λ_iblr)
         z_s = sample(q)
         g_i = df_m(z_s)
         H_i=  df_H(z_s)
-        if isnan(g_i) || isinf(g_i) || isnan(H_i) || isinf(H_i)
-            λ_iblr = λ_iblr_stable
-            continue
-        else
-            λ_iblr_stable = deepcopy(λ_iblr)
-        end
-
-        # Compute natural gradients of BC parametrization
         g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
         g_μ_2= -H_i+η[2]-λ_iblr[2]
-        #Update BC parameters
-        λ_iblr[1] += β_t*g_μ_1
-        λ_iblr[2] += β_t*g_μ_2+0.5*(β_t*g_μ_2)^2/λ_iblr[2]
-        # if isProper(bcToStandardDist(msg_in.dist,λ_iblr)) == false
-        #     λ_iblr = λ_iblr_copy
-        # end
+        g̃=[g_μ_1;g_μ_2]
+        update!(opt,λ_iblr,g̃,msg_in.dist)
     end
     λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
     return λ_natural_posterior
@@ -283,32 +328,28 @@ function renderCVI(logp_nc::Function,
     df_H(z) = ForwardDiff.jacobian(df_m,z)
 
     # λ_init are Natural Parameters for MV Gaussian
+    #params = [vec(μ),mat(S)]
     n = dims(msg_in.dist)
-    β_t = getfield(opt,:eta)
     m_prior = deepcopy(unsafeMean(msg_in.dist))
     S_prior = deepcopy(unsafePrecision(msg_in.dist))
     S_t = deepcopy(reshape(-2*λ_init[n+1:end],n,n))
     m_t = deepcopy(S_t*λ_init[1:n])
+    params = [m_t,S_t]
+    opt.stable_params= deepcopy(params)
     for i=1:num_iterations
-        q = bcToStandardDist(msg_in.dist,[m_t;vec(S_t)])
+        q = bcToStandardDist(msg_in.dist,[params[1];vec(params[2])])
         z_s = sample(q)
         g_i = df_m(z_s)
         H_i = df_H(z_s)
-        m_t_old = deepcopy(m_t)
-        S_t_old = deepcopy(S_t)
         # Compute natural gradients of BCN parametrization
-        s_inv = deepcopy(cholinv(S_t))
-        g_μ_1 = s_inv*(g_i+S_prior*(m_prior-m_t))
-        g_μ_2= -H_i+S_prior-S_t
-        # Update [μ,S]
-        m_t += β_t*g_μ_1
-        S_t += β_t*g_μ_2+0.5*(β_t)^2*g_μ_2*s_inv*g_μ_2
-        if isProper(bcToStandardDist(msg_in.dist,[m_t;vec(S_t)])) == false
-            m_t = m_t_old
-            S_t = S_t_old
-        end
+        s_inv = deepcopy(cholinv(params[2]))
+        g_μ_1 = s_inv*(g_i+S_prior*(m_prior-params[1]))
+        g_μ_2= -H_i+S_prior-params[2]
+        g̃=[g_μ_1,g_μ_2]
+        update!(opt,params,g̃,msg_in.dist,s_inv)
+
     end
-    λ_natural_posterior = [S_t*m_t;vec(-0.5*S_t)]
+    λ_natural_posterior = [params[2]*params[1];vec(-0.5*params[2])]
     return λ_natural_posterior
 end
 
