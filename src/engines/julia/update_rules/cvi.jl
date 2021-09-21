@@ -1,5 +1,4 @@
 export ruleSPCVIOutVD, ruleSPCVIIn1MV, ruleSPCVIOutVDX, ruleSPCVIInX
-
 function ruleSPCVIIn1MV(node_id::Symbol,
                         msg_out::Message{<:FactorFunction, <:VariateType},
                         msg_in::Message{<:FactorNode, <:VariateType})
@@ -201,7 +200,7 @@ function bcToStandardDist(dist::ProbabilityDistribution{Multivariate, F}, η::Ve
     W = Matrix(Hermitian(W + tiny*diageye(d))) # Ensure precision is always invertible
     ProbabilityDistribution(Multivariate, GaussianWeightedMeanPrecision,xi=XI,w=W)
 end
-function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
+function update1!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
     #params = [μ,S]
     if any(isnan.(natgrad)) || any(isinf.(natgrad))
         # Gradients are non-numeric
@@ -225,7 +224,7 @@ function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Univari
         end
     end
 end
-function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Multivariate, F},s_inv::Array{Float64,2}) where F <: Gaussian
+function update1!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Multivariate, F},s_inv::Array{Float64,2}) where F <: Gaussian
     #params = [vec(μ),mat(S)]
     any_nan_value = any(any.((x->isnan.(x)).(natgrad)))
     any_inf_value = any(any.((x->isinf.(x)).(natgrad)))
@@ -252,9 +251,15 @@ function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Multiva
         end
     end
 end
-function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Multivariate, F}) where F <: Gaussian
+function update1!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Multivariate, F}) where F <: Gaussian
     s_inv = deepcopy(cholinv(params[2]))
     update!(opt,params,natgrad,prior,s_inv)
+end
+
+
+function KL_bc(λ::Vector,λ_0::Vector,dist::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
+    # 0.5 [log(σ^2/σ_0^2)+(σ^2+(μ-μ_0)^2)/(σ_0)^2-1]
+    return 0.5 *(log(λ[2]/λ_0[2])+ (λ[2]+(λ[1]-λ_0[1])^2)/(λ_0[2])-1)
 end
 
 function renderCVI(logp_nc::Function,
@@ -312,11 +317,55 @@ function renderCVI(logp_nc::Function,
         g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
         g_μ_2= -H_i+η[2]-λ_iblr[2]
         g̃=[g_μ_1;g_μ_2]
-        update!(opt,λ_iblr,g̃,msg_in.dist)
+        update1!(opt,λ_iblr,g̃,msg_in.dist)
     end
     λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
     return λ_natural_posterior
 end
+
+function renderCVI_test_F(logp_nc::Function,
+                   num_iterations::Int,
+                   opt::iBLR,
+                   λ_init::Vector,
+                   msg_in::Message{<:Gaussian, Univariate})
+
+    """
+    improved Bayesian Learning Rule implementation for CVI node
+        BC Parameters are mean and precision(=[μ,S]) for Gaussian
+    """
+
+    df_m(z) = ForwardDiff.derivative(logp_nc,z)
+    df_H(z) = ForwardDiff.derivative(df_m,z)
+
+    η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
+    λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
+    λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
+    λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+    opt.stable_params = deepcopy(λ_iblr) # initialize stable point
+
+    # result = DiffResults.HessianResult([1.0])
+    F = Vector{Float64}(undef,num_iterations)
+    λ_array = Vector{Array{Float64,1}}(undef,num_iterations)
+    for i=1:num_iterations
+        q = bcToStandardDist(msg_in.dist,λ_iblr)
+        z_s = sample(q)
+        # ForwardDiff.hessian!(result, logp_nc, [z_s]);
+        # g_i = DiffResults.gradient(result)
+        # H_i = DiffResults.hessian(result)
+        value = logp_nc(z_s)
+        g_i = df_m(z_s)
+        H_i=  df_H(z_s)
+        g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
+        g_μ_2= -H_i+η[2]-λ_iblr[2]
+        g̃=[g_μ_1;g_μ_2]
+        update1!(opt,λ_iblr,g̃,msg_in.dist)
+        λ_array[i] = deepcopy(λ_iblr)
+        F[i] = KL_bc(λ_iblr,η,msg_in.dist) - value
+    end
+    λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
+    return λ_array,F
+end
+
 
 function renderCVI(logp_nc::Function,
                    num_iterations::Int,
@@ -346,7 +395,7 @@ function renderCVI(logp_nc::Function,
         g_μ_1 = s_inv*(g_i+S_prior*(m_prior-params[1]))
         g_μ_2= -H_i+S_prior-params[2]
         g̃=[g_μ_1,g_μ_2]
-        update!(opt,params,g̃,msg_in.dist,s_inv)
+        update1!(opt,params,g̃,msg_in.dist,s_inv)
 
     end
     λ_natural_posterior = [params[2]*params[1];vec(-0.5*params[2])]
