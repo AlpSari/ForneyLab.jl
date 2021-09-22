@@ -181,6 +181,50 @@ mutable struct iBLR
     state::Int64
     stable_params::Any
 end
+
+mutable struct FE_stats
+    F_prev::Float64 # FE from previous iterate
+    F_best::Float64 # Minimum attained FE
+    F_best_idx:: Int64 # Index of Minimum attained FE
+    F_converge_idx::Int64 # Index of Minimum attained FE
+    ΔF_rel::Float64 # Relative difference between F_now and F_prev
+    ΔF_vect::Vector{Float64}
+end # struct
+FE_stats()=FE_stats(Inf,Inf,-1,-1,Inf,Vector{Float64}())
+function median(a::F) where F<:AbstractArray
+    #TODO: TRY TO USE median of Statistics.jl package
+    len = size(a)[1]
+    if mod(len,2) ==1
+        middle = Int64((len+1)/2)
+        return sort(a)[middle]
+    else
+        middle = Int64(len/2)
+        return mean(sort(a)[middle:middle+1])
+    end
+end
+
+function ΔFE_check!(stats::FE_stats,F_now::Float64,idx_now::Int64,tolerance::Float64)
+    # Return true if Free Energy is converged, return false else
+    if F_now < stats.F_best
+        stats.F_best = deepcopy(F_now)
+        stats.F_best_idx = deepcopy(idx_now)
+    end
+    stats.ΔF_rel = abs(100*(F_now-stats.F_prev)/(stats.F_prev))
+    push!(stats.ΔF_vect,stats.ΔF_rel)
+    # Calculate mean/median
+    vect_mean = mean(stats.ΔF_vect)
+    vect_median = median(stats.ΔF_vect)
+    if vect_mean < tolerance || vect_median < tolerance
+        stats.F_converge_idx = deepcopy(idx_now)
+        stats.F_prev = deepcopy(F_now) #Also becomes F at convergence
+        return true
+    else # No convergence, get ready for the next call of the function
+    stats.F_prev = deepcopy(F_now)
+        return false
+    end
+end
+
+
 iBLR()=iBLR(0.1,0,nothing)
 iBLR(eta::F) where F <: Number = iBLR(eta,0,nothing)
 iBLR(eta,state) = iBLR(eta,state,nothing)
@@ -323,49 +367,108 @@ function renderCVI(logp_nc::Function,
     return λ_natural_posterior
 end
 
-function renderCVI_test_F(logp_nc::Function,
+function renderCVI_Δ_FE(logp_nc::Function,
                    num_iterations::Int,
                    opt::iBLR,
                    λ_init::Vector,
                    msg_in::Message{<:Gaussian, Univariate})
-
-    """
-    improved Bayesian Learning Rule implementation for CVI node
-        BC Parameters are mean and precision(=[μ,S]) for Gaussian
-    """
-
+   """
+   improved Bayesian Learning Rule implementation for CVI node
+       BC Parameters are mean and precision(=[μ,S]) for Gaussian
+       with early stopping criterion based on mean/median of relative difference of Free Energy
+       similar to STAN's algorithm
+   """
     df_m(z) = ForwardDiff.derivative(logp_nc,z)
     df_H(z) = ForwardDiff.derivative(df_m,z)
 
+    # iBLR Initialization
     η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
     λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
     λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
     λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
     opt.stable_params = deepcopy(λ_iblr) # initialize stable point
 
-    # result = DiffResults.HessianResult([1.0])
-    F = Vector{Float64}(undef,num_iterations)
-    λ_array = Vector{Array{Float64,1}}(undef,num_iterations)
+    # Δ_FE Initialization
+    stats = FE_stats() #initialize ΔElbo object
+    eval_elbo_window = 10
+    tolerance = 0.005
+    burn_in_min = 9
+    burn_in_max = floor(num_iterations/10)
+    FE_check = false
+    is_FE_converged = false
+    λ_iblr_best = deepcopy(λ_iblr)
+    F = Dict{Int64,Float64}()
+
+    println("---Δ_FE Parameters---")
+    println("Evaluate FE every $eval_elbo_window'th iteration")
+    println("Tolerance (%):$tolerance")
+    println("Burn_in_min:$burn_in_min ,Burn_in_max:$burn_in_max")
+    println("-------")
+    # ---
     for i=1:num_iterations
         q = bcToStandardDist(msg_in.dist,λ_iblr)
         z_s = sample(q)
         # ForwardDiff.hessian!(result, logp_nc, [z_s]);
         # g_i = DiffResults.gradient(result)
         # H_i = DiffResults.hessian(result)
-        value = logp_nc(z_s)
         g_i = df_m(z_s)
         H_i=  df_H(z_s)
         g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
         g_μ_2= -H_i+η[2]-λ_iblr[2]
         g̃=[g_μ_1;g_μ_2]
         update1!(opt,λ_iblr,g̃,msg_in.dist)
-        λ_array[i] = deepcopy(λ_iblr)
-        F[i] = KL_bc(λ_iblr,η,msg_in.dist) - value
-    end
-    λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
-    return λ_array,F
-end
 
+        # ---- START Δ_FE Algo
+        #TODO : Note that FE is calculated after First update, it can be calculated
+        # with prior params (but then KL part becomes 0)
+        if i ==1
+            F_first = KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
+            stats.F_best = F_first
+            stats.F_prev = deepcopy(stats.F_best)
+            stats.F_best_idx = 1
+            push!(F,1=>F_first)
+        end
+        # If iteration # is smaller then burn_in_min, dont calculate FE
+        if i <= burn_in_min
+            nothing
+        # First,Calc FE every eval_elbo_window'th step
+        elseif mod(i,eval_elbo_window) == 0
+            FE = KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
+            push!(F,i=>FE)
+            #First condition to start tests: FE is smaller than initial FE
+            if FE_check == false && FE < stats.F_best
+                FE_check = true # FE dropped below initial ELBO
+                println("FE_check starts when i=$i")
+            #Second condition to start tests: i exceeds burn_in_max period
+            elseif FE_check == false && i > burn_in_max
+                FE_check = true
+                println("FE_check starts when i=$i")
+            end
+            # If tests start, check convergence
+            if FE_check
+                is_FE_converged = ΔFE_check!(stats,FE,i,tolerance)
+                # Store λ yielding minimum Free Energy
+                if stats.F_best_idx == i
+                    λ_iblr_best = deepcopy(λ_iblr)
+                end
+            end
+            # If converged, stop iterations
+            if is_FE_converged
+                println("Algorithm converged at iteration $i")
+                break
+            end
+        end
+        # ---- End Δ_FE ALGO
+    end # End for loop
+    if is_FE_converged
+        # return best iterate
+        λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr_best)
+    else
+        #return last iterate
+        λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
+    end
+    return λ_natural_posterior
+end
 
 function renderCVI(logp_nc::Function,
                    num_iterations::Int,
