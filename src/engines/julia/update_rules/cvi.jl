@@ -174,7 +174,7 @@ end
 #---------------------------
 # CVI implementations
 #---------------------------
-import StatsBase:percentile
+import StatsBase:percentile,autocor
 import Flux.Optimise:update!
 import Statistics:median,var
 # Additional definitions for iBLR implementation of CVI
@@ -198,6 +198,40 @@ mutable struct FE_stats
     ΔF_vect::Vector{Float64}
     FE_vect::Vector{Float64}#TODO: delete this field later, this is for debugging
 end # struct
+
+#----  Optimization Algorithm Configuration Parameters Type Definitions
+mutable struct ConvergenceParamsFE
+    burn_in_min ::Int64
+    burn_in_max ::Int64
+    tolerance_mean ::Float64
+    tolerance_median ::Float64
+end # struct
+mutable struct ConvergenceParamsMC
+    pareto_k_thr ::Float64
+    pareto_num_samples ::Float64
+    mcmc_num_chains ::Int64
+    mcmc_window_len ::Float64
+    rhat_cutoff ::Float64
+    mcse_cutoff ::Float64
+    ess_cutoff ::Float64
+end # struct
+mutable struct StepSizeParams
+    init_stepsize ::Float64
+    current_stepsize ::Float64
+    stepsize_update_func :: Function
+end # struct
+mutable struct OptimizationArgs
+    is_convergence_auto ::Bool
+    is_stepsize_auto ::Bool
+end # struct
+# TODO : Finish Rhat implementation
+# TODO : Implement Inexact Line Search
+# TODO: For now, take a dictionary inside optimizer which has necessary parameters
+# For the nonexisting parameters, use default values which favors auto Configuration
+# TODO : Write a master function renderCVI for iBLR which is automatized where it
+# is requested / uses manual parameters if specified.
+#---
+
 FE_stats()=FE_stats(Inf,Inf,-1,-1,Inf,Vector{Float64}(),Vector{Float64}())
 
 
@@ -537,10 +571,8 @@ function renderCVI_Δ_FE(logp_nc::Function,
     return λ_natural_posterior,stats
 end
 # iBLR with Rhat diagnostic for convergence
-
-function oneWindowSimulation_MCMC(J::F,Window::F,opts,η::Vector,λ_initials::Vector,logp_nc::Function,is_first_sim :: Bool, msg_in::Message{<:Gaussian, Univariate}) where F<:Number
-    df_m(z) = ForwardDiff.derivative(logp_nc,z)
-    df_H(z) = ForwardDiff.derivative(df_m,z)
+function oneWindowSimulation_MCMC(J::F,Window::F,opts,η::Vector,λ_initials::Vector,logp_nc::Function,is_first_sim :: Bool,msg_in::Message{<:Gaussian, Univariate}) where F<:Number
+    # Chain Initialization
     if is_first_sim
         # First sim -> initial point is the same for all chains
         params_container = [[λ_initials] for j=1:J]
@@ -551,6 +583,9 @@ function oneWindowSimulation_MCMC(J::F,Window::F,opts,η::Vector,λ_initials::Ve
         opt_matrix =deepcopy(opts)
     end
     # Run one simulation window for all chains
+    # Start simulation --- This part is specific for each msg_in
+    df_m(z) = ForwardDiff.derivative(logp_nc,z)
+    df_H(z) = ForwardDiff.derivative(df_m,z)
     for n =1:Window
         for j=1:J
             # push λ_t as λ_t+1 so that it will get updated in-place
@@ -567,28 +602,44 @@ function oneWindowSimulation_MCMC(J::F,Window::F,opts,η::Vector,λ_initials::Ve
             update!(opt_matrix[j],params_container[j][end],g̃,msg_in.dist)
         end
     end
-    # Calculate Rhat
-    # Calculate window statistics
-    total_len =length(params_container[1][:])
-    burn_in =Int64(floor(total_len/2)) #Samples discarded
-    half_chain_end = burn_in+Int64(floor((total_len-burn_in)/2))
-    # Split Chains in half and calculate mean/variance of all
-    chain_means = [mean(params_container[j][burn_in:half_chain_end]) for j=1:J]
-    chain_secondhalves_mean = [mean(params_container[j][half_chain_end+1:end]) for j=1:J]
-    chain_vars = [var(params_container[j][burn_in:half_chain_end]) for j=1:J]
-    chain_secondhalves_var = [var(params_container[j][half_chain_end+1:end]) for j=1:J]
-    append!(chain_means,chain_secondhalves_mean)
-    append!(chain_vars,chain_secondhalves_var)
-    # Calculate Rhat
+    last_params = [params_container[j][end] for j=1:J]
+    # --- End of Simulation
+    stats_dict = Dict()
+    # Calculate Where to split the chain
+    total_len =Window+1
+    k =  mod(Window,4) # how many extra samples to include in burn_in
+    burn_in = Int64((Window-k)/2)+1+k  # Half of a chain
+    half_chain_end = 3*Int64((Window-k)/4)+1+k # Mid of last half
+    n = half_chain_end - burn_in + 1 #Samples per split-chain
+    # Split chains in half
+    split_chains = [params_container[j][start_idx:end_idx] for j=1:J for (start_idx,end_idx) in zip((burn_in+1,half_chain_end+1),(half_chain_end,total_len))]
+    # Calculate mean/variance of all split chains
+    chain_means = [mean(chain) for chain in split_chains]
+    chain_vars = [var(chain) for chain in split_chains]
+    # Calculate necessary statistics for Rhat,ESS and MCSE
     W = mean(chain_vars) # mean of within chain variances
     B_n = var(chain_means) # B/n : variance of means of chains
-    σ_2_plus = ((Window-1)/Window)*W+B_n
-    println("---")
-    println("W= $W,B_n=$B_n,σ_2_plus=$σ_2_plus")
-    Rhat = sqrt.(σ_2_plus./W)
-    # Return Rhat and Last Parameters
-    last_params = [params_container[j][end] for j=1:J]
-    return last_params,opt_matrix,Rhat
+    σ_2_plus = ((n-1)/n)*W+B_n
+    # Calculate Rhat
+    rhat = sqrt.(σ_2_plus./W)
+    # Calculate Effective Sample Size (For Mean parameter only)
+    # Eq.(10) in An improved Rhat for assessing convergence of MCMC paper
+    # 2*J comes since we split each chain in half
+    # Index [1] is for the mean parameter
+    meanparam_ρ_tj= [autocor([λ[1] for λ in split_chains[j]]) for j=1:2*J];#ρ_tj
+    meanparam_var_j=[chain_vars[j][1] for j=1:length(chain_vars)] #sj^2
+    weighted_corr = mean(meanparam_var_j.*meanparam_ρ_tj,dims=1)[1]
+    ρ_t = 1.0 .- (W[1] .- weighted_corr)./(σ_2_plus[1])
+    # Calculate ESS
+    ess = (2*J)*n/(1+2*sum(ρ_t))
+    # Calculate Monte Carlo Standard Error (MCSE)
+    mcse = sqrt(σ_2_plus[1]/ess)
+    # Calculate Iterate Average
+    # Note: Mean of means of chains is only true since chains have same sample size
+    λ_bar = mean(chain_means)
+    stats_dict=Dict(:rhat=>rhat,:ess=>ess,:mcse=>mcse,:λ_bar=>λ_bar)
+
+    return last_params,opt_matrix,stats_dict
 end
 
 function renderCVI_Rhat(logp_nc::Function,
@@ -596,7 +647,7 @@ function renderCVI_Rhat(logp_nc::Function,
                    opt::iBLR,
                    λ_init::Vector,
                    msg_in::Message{<:Gaussian, Univariate},
-                   num_simulations,tau)
+                   num_simulations,tau,J,Window)
 
     """
     improved Bayesian Learning Rule implementation for CVI node
@@ -612,14 +663,29 @@ function renderCVI_Rhat(logp_nc::Function,
     λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
     opt.stable_params = deepcopy(λ_iblr) # initialize stable point
     # Rhat Diagnostic Params
-    J = 5
-    Window = 100 #also n
-    last_params,opt_matrix,Rhat=oneWindowSimulation_MCMC(J,Window,opt,η,λ_iblr,logp_nc,true,msg_in)
+    # J = 25
+    # Window = 1000 #also n
+    last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Window,opt,η,λ_iblr,logp_nc,true,msg_in)
+    println("i=0,Last_params = $(last_params[1]),Rhat=$(stats_dict[:rhat])")
     for i = 1:num_simulations
-        last_params,opt_matrix,Rhat=oneWindowSimulation_MCMC(J,Window,opt_matrix,η,last_params,logp_nc,false,msg_in)
-
+        last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Window,opt_matrix,η,last_params,logp_nc,false,msg_in)
+        println("i=$i,Last_params = $(last_params[1]),Rhat=$(stats_dict[:rhat])")
+        if all(stats_dict[:rhat] .< tau)
+            break
+        end
     end
-    return last_params,Rhat
+    #TODO: DO the below iteration when Rhat converges or WARN THE USER that VI might not be converged
+    # After stationary point has been found / Max number of simulations
+    for i=1:num_simulations
+        last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Window,opt_matrix,η,last_params,logp_nc,false,msg_in)
+        # Check MCSE and ESS
+        if all(stats_dict[:mcse] .< 0.1) && all(stats_dict[:ess] .> 15.0)
+            println("Converged Parameters using Iterate Averaging = $(stats_dict[:λ_bar])")
+            break
+        end
+    end
+    #TODO: Return Natural Params in Normal Implementation
+    return last_params,stats_dict
 
 end
 # Pareto shape parameter fit function
