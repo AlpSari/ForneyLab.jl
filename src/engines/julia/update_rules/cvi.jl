@@ -183,6 +183,9 @@ mutable struct iBLR
     state::Int64
     stable_params::Any
 end
+
+
+
 mutable struct iBLR_AdaGrad
     eta::Float64
     state::Int64
@@ -198,7 +201,10 @@ mutable struct FE_stats
     ΔF_vect::Vector{Float64}
     FE_vect::Vector{Float64}#TODO: delete this field later, this is for debugging
 end # struct
-
+iBLR()=iBLR(0.1,0,nothing)
+iBLR(eta::F) where F <: Number = iBLR(eta,0,nothing)
+iBLR(eta,state) = iBLR(eta,state,nothing)
+iBLR_AdaGrad()=iBLR_AdaGrad(0.1,0,nothing,nothing)
 #----  Optimization Algorithm Configuration Parameters Type Definitions
 mutable struct ConvergenceParamsFE
     burn_in_min ::Int64
@@ -213,7 +219,7 @@ mutable struct ConvergenceParamsMC
     mcmc_window_len ::Float64
     rhat_cutoff ::Float64
     mcse_cutoff ::Float64
-    ess_cutoff ::Float64
+    ess_threshold ::Float64
 end # struct
 mutable struct StepSizeParams
     init_stepsize ::Float64
@@ -256,10 +262,7 @@ function ΔFE_check!(stats::FE_stats,F_now::Float64,idx_now::Int64,tolerance::Fl
         return false
     end
 end
-iBLR()=iBLR(0.1,0,nothing)
-iBLR(eta::F) where F <: Number = iBLR(eta,0,nothing)
-iBLR(eta,state) = iBLR(eta,state,nothing)
-iBLR_AdaGrad()=iBLR_AdaGrad(0.1,0,nothing,nothing)
+
 bcParams(dist::ProbabilityDistribution{Univariate, F}) where F<:Gaussian = [unsafeMean(dist),unsafePrecision(dist)]
 bcParams(dist::ProbabilityDistribution{Multivariate, F}) where F<:Gaussian = [vec(unsafeMean(dist)); vec(unsafePrecision(dist))]
 function bcToStandardDist(dist::ProbabilityDistribution{Univariate, F}, η::Vector) where F<:Gaussian
