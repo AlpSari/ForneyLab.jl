@@ -184,35 +184,30 @@ mutable struct iBLR
     stable_params::Any
 end
 
-
-
-mutable struct iBLR_AdaGrad
-    eta::Float64
-    state::Int64
-    stable_params::Any
-    grad_acc::Any
+#--- Struct definitions
+abstract type ConvergenceOptimizer end
+Base.@kwdef mutable struct DefaultOptim <: ConvergenceOptimizer
+    max_iterations ::Int64
 end
-mutable struct FE_stats
+Base.@kwdef mutable struct ConvergenceStatsFE
     F_prev::Float64 # FE from previous iterate
     F_best::Float64 # Minimum attained FE
-    F_best_idx:: Int64 # Index of Minimum attained FE
+    F_best_idx::Int64 # Index of Minimum attained FE
     F_converge_idx::Int64 # Index of Minimum attained FE
     ΔF_rel::Float64 # Relative difference between F_now and F_prev
     ΔF_vect::Vector{Float64}
     FE_vect::Vector{Float64}#TODO: delete this field later, this is for debugging
 end # struct
-iBLR()=iBLR(0.1,0,nothing)
-iBLR(eta::F) where F <: Number = iBLR(eta,0,nothing)
-iBLR(eta,state) = iBLR(eta,state,nothing)
-iBLR_AdaGrad()=iBLR_AdaGrad(0.1,0,nothing,nothing)
-#----  Optimization Algorithm Configuration Parameters Type Definitions
-mutable struct ConvergenceParamsFE
-    burn_in_min ::Int64
-    burn_in_max ::Int64
+Base.@kwdef mutable struct ConvergenceParamsFE <: ConvergenceOptimizer
+    max_iterations::Int64
+    burn_in_min ::Float64
+    burn_in_max ::Float64
     tolerance_mean ::Float64
     tolerance_median ::Float64
+    stats::ConvergenceStatsFE #NEW
 end # struct
-mutable struct ConvergenceParamsMC
+Base.@kwdef mutable struct ConvergenceParamsMC <: ConvergenceOptimizer
+    max_iterations::Int64
     pareto_k_thr ::Float64
     pareto_num_samples ::Float64
     mcmc_num_chains ::Int64
@@ -221,27 +216,333 @@ mutable struct ConvergenceParamsMC
     mcse_cutoff ::Float64
     ess_threshold ::Float64
 end # struct
-mutable struct StepSizeParams
-    init_stepsize ::Float64
-    current_stepsize ::Float64
-    stepsize_update_func :: Function
+Base.@kwdef mutable struct StepSizeParams
+    init_stepsize::Float64
+    current_stepsize::Float64
+    stepsize_update_func::Function
 end # struct
-mutable struct OptimizationArgs
-    is_convergence_auto ::Bool
-    is_stepsize_auto ::Bool
-end # struct
-# TODO : Finish Rhat implementation
-# TODO : Implement Inexact Line Search
-# TODO: For now, take a dictionary inside optimizer which has necessary parameters
-# For the nonexisting parameters, use default values which favors auto Configuration
-# TODO : Write a master function renderCVI for iBLR which is automatized where it
-# is requested / uses manual parameters if specified.
+Base.@kwdef mutable struct ParamStr2
+    eta::Float64
+    state::Int64
+    stable_params::Union{Vector,Nothing}
+    convergence_algo::String # Determines the convergence algorithm
+    auto_init_stepsize::Bool # Determines the initial stepsize
+    convergence_optimizer::ConvergenceOptimizer
+    stepsize_optimizer::StepSizeParams
+end
+
+#--- Helper functions for struct initalizations
+function check_all_keys(x::Dict,dtype::DataType)
+    list = [key in fieldnames(dtype) for key in keys(x)]
+    length(fieldnames(dtype))==count(x->x==true,list) ? true : false
+end
+#--- Constructors for structs
+function DefaultOptim(x::Dict)
+    if length(keys(x)) == 0
+        return DefaultOptim()
+    end
+    have_all_keys = check_all_keys(x,DefaultOptim)
+    if have_all_keys
+        # This code will run eventually from other outer constructors which provide x::Dict with all fields
+        return DefaultOptim(x[:max_iterations])
+    else
+        return DefaultOptim(;x...) # refer to different outer constructor
+    end
+end
+function DefaultOptim(;kwargs...)
+    defaults=(max_iterations =Int64(1e6),)
+    ntuple= merge(defaults,kwargs)
+    settings = Dict(pairs(ntuple))
+    return DefaultOptim(settings)
+end
+#
+function ConvergenceStatsFE(x::Dict)
+    if length(keys(x)) == 0
+        return ConvergenceStatsFE()
+    end
+    have_all_keys = check_all_keys(x,ConvergenceStatsFE)
+    if have_all_keys
+        # This code will run eventually from other outer constructors which provide x::Dict with all fields
+        return ConvergenceStatsFE(x[:F_prev],x[:F_best],x[:F_best_idx],x[:F_converge_idx],x[:ΔF_rel],x[:ΔF_vect],x[:FE_vect])
+    else
+        return ConvergenceStatsFE(;x...) # refer to different outer constructor
+    end
+end
+function ConvergenceStatsFE(;kwargs...)
+    defaults= (;F_prev = Inf,
+    F_best = Inf,
+    F_best_idx = -1,
+    F_converge_idx = -1,
+    ΔF_rel  = Inf,
+    ΔF_vect = Vector{Float64}(),
+    FE_vect = Vector{Float64}()) # namedtuple with default params
+    ntuple= merge(defaults,kwargs)
+    settings = Dict(pairs(ntuple))
+    return ConvergenceStatsFE(settings)
+end
+#
+function ConvergenceParamsFE(;kwargs...)
+    defaults =(max_iterations= Int64(1e6),
+            eval_FE_window=0.002,
+            burn_in_min = 0.05,
+            burn_in_max = 0.15,
+            tolerance_mean = 0.1,
+            tolerance_median = 0.1,
+            stats=ConvergenceStatsFE())
+    ntuple= merge(defaults,kwargs)
+    settings = Dict(pairs(ntuple))
+    stats_struct =ConvergenceStatsFE(;settings...)
+    settings[:stats] =stats_struct
+    return ConvergenceParamsFE(settings)
+end
+function ConvergenceParamsFE(x::Dict)
+    if length(keys(x)) == 0
+        return ConvergenceParamsFE()
+    end
+    have_all_keys=check_all_keys(x,ConvergenceParamsFE)
+    if have_all_keys
+        # This code will run eventually from other outer constructors which provide x::Dict with all fields
+        return ConvergenceParamsFE(x[:max_iterations],x[:eval_FE_window],x[:burn_in_min],x[:burn_in_max],x[:tolerance_mean],x[:tolerance_median],x[:stats])
+    else
+        return ConvergenceParamsFE(;x...) # refer to different outer constructor
+    end
+end
+#
+function ConvergenceParamsMC(;kwargs...)
+    defaults= (max_iterations= Int64(1e6),pareto_k_thr= 0.7,
+        pareto_num_samples = 1000.0,
+        mcmc_num_chains= 10,
+        mcmc_window_len= 500,
+        rhat_cutoff= 1.2,
+        mcse_cutoff= 1.0,
+        ess_threshold= 100.0)
+    ntuple= merge(defaults,kwargs)
+    settings = Dict(pairs(ntuple))
+    return ConvergenceParamsMC(settings)
+end
+function ConvergenceParamsMC(x::Dict)
+    if length(keys(x)) == 0
+        return ConvergenceParamsMC()
+    end
+    have_all_keys = check_all_keys(x,ConvergenceParamsMC)
+    if have_all_keys
+        # This code will run eventually from other outer constructors which provide x::Dict with all fields
+        return ConvergenceParamsMC(x[:max_iterations],x[:pareto_k_thr],x[:pareto_num_samples],x[:mcmc_num_chains],x[:mcmc_window_len],x[:rhat_cutoff],
+        x[:mcse_cutoff],x[:ess_threshold])
+    else
+        return ConvergenceParamsMC(;x...) # refer to different outer constructor
+    end
+end
+#
+function StepSizeParams(;kwargs...)
+    defaults = (init_stepsize= 0.0,
+            current_stepsize = 0.0,
+            stepsize_update_func= x->x)
+    belongsto(s) = first(s) in fieldnames(StepSizeParams)
+    ntuple= merge(defaults,kwargs)
+    settings = Dict(pairs(ntuple))
+    return StepSizeParams(settings)
+end
+function StepSizeParams(x::Dict)
+    if length(keys(x)) == 0
+        return StepSizeParams()
+    end
+    have_all_keys = check_all_keys(x,StepSizeParams)
+    if have_all_keys
+        # This code will run eventually from other outer constructors which provide x::Dict with all fields
+        return StepSizeParams(x[:init_stepsize],x[:current_stepsize],x[:stepsize_update_func])
+    else
+        return StepSizeParams(;x...) # refer to different outer constructor
+    end
+end
+#
+function ParamStr2(x::Dict)
+    if length(keys(x)) == 0
+        return ParamStr2()
+    end
+    have_all_keys_params = check_all_keys(x,ParamStr2)
+    if have_all_keys_params
+        # This code will run eventually from other outer constructors which provide x::Dict with all fields
+        return ParamStr2(x[:eta],x[:state],x[:stable_params],x[:convergence_algo],x[:auto_init_stepsize],x[:convergence_optimizer],x[:stepsize_optimizer])
+    else
+        return ParamStr2(;x...) # refer to different outer constructor
+    end
+end
+
+function ParamStr2(;kwargs...)
+
+    defaults = (eta = 0.0,state=1,stable_params=nothing,convergence_algo="free_energy",auto_init_stepsize=true,
+            convergence_optimizer=ConvergenceParamsFE(),
+            stepsize_optimizer=StepSizeParams())
+    ntuple= merge(defaults,kwargs)
+    settings = Dict(pairs(ntuple))
+    convergence_algo_str = settings[:convergence_algo]
+    # 1) Check convergence algo string to determine convergence_optimizer type
+    if convergence_algo_str == "free_energy"
+        if ! (typeof(settings[:convergence_optimizer]) == ConvergenceParamsFE) #throw error since this is the default choice
+            throw(ArgumentError("Invalid choice of optimizer ($convergence_optimizer) for the given convergence algorithm."))
+        end
+        optim_alias = ConvergenceParamsFE
+    elseif convergence_algo_str == "MonteCarlo"
+        optim_alias = ConvergenceParamsMC
+    elseif convergence_algo_str == "none"
+        optim_alias = DefaultOptim
+    else
+        throw(ArgumentError("Invalid string ('$convergence_algo_str') for convergence algorithm specification"))
+    end
+    # 2) Check if initial stepsize is given, otherwise determine it by Auto (Wolfe Condition)
+    if !settings[:auto_init_stepsize]
+        # Assert that user did not specify an invalid stepsize
+        # TODO: Maybe negative stepsize should be asserted along with 0.0 stepsize
+        settings[:eta] == 0.0 ? throw(ArgumentError("Stepsize ':eta' cannot be $(settings[:eta]) when step size is manually provided.")) : nothing
+    else
+        nothing #Determine by Wolfe Condition
+    end
+        #Init Optim struct
+        optimizer = optim_alias(settings)
+        #Init StepSize struct
+        ss_struct = StepSizeParams(settings)
+        # Make Adjustments to Settings
+        settings[:convergence_optimizer] = optimizer
+        settings[:stepsize_optimizer] = ss_struct
+        return ParamStr2(settings)
+end
+#--- renderCVI function
+function inexactLineSearch()
+    #TODO: Implement WolfeConditons for inexactLineSearch
+    return 1.0
+end
+function renderCVI_master(logp_nc::Function,
+                   num_iterations::Int,
+                   opt::ParamStr2,
+                   λ_init::Vector,
+                   msg_in::Message{<:Gaussian, Univariate})
+    # TODO: Make this function is for any msg_in and assert msg_in for ConvergenceLoop
+    # 1) Check if the optimizer is initialized
+    stepsize_optimizer = opt.stepsize_optimizer
+    convergence_optimizer = opt.convergence_optimizer
+    if !(opt.is_initialized)
+        # Check if auto stepsize detection is requested
+        if opt.auto_init_stepsize
+            opt.eta = inexactLineSearch()
+            stepsize_optimizer.init_stepsize = deepcopy(opt.eta)
+            stepsize_optimizer.current_stepsize = deepcopy(opt.eta)
+        else
+            # Manual setting of stepsize
+            stepsize_optimizer.init_stepsize = deepcopy(opt.eta)
+            stepsize_optimizer.current_stepsize = deepcopy(opt.eta)
+        end
+    end
+    # # 2) Initialize parameter λ_q and prior λ_0
+    # η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
+    # λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
+    # λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
+    # λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+    # # 3) Set Stable params
+    # opt.stable_params = deepcopy(λ_iblr) # initialize stable point
+    # 4) Run Optimization Loop depending on the type of ConvergenceOptimizer
+    if typeof(convergence_optimizer) == ConvergenceParamsFE
+        renderCVI_ΔFE(logp_nc,opt,λ_iblr,msg_in)
+    elseif typeof(convergence_optimizer) == ConvergenceParamsMC
+        renderCVI_MCMC()
+    elseif typeof(convergence_optimizer) == DefaultOptimizer
+        renderCVI_Default()
+    else
+        throw(ArgumentError("Invalid convergence_optimizer($convergence_optimizer)"))
+    end
+
+
+end
+
+function renderCVI_ΔFE(logp_nc::Function,
+                   opt::ParamStr2,
+                   λ_init::Vector,
+                   msg_in::Message{<:Gaussian, Univariate})
+
+    convergence_optimizer = opt.convergence_optimizer
+    stats = convergence_optimizer.stats
+    # 1) Initialize parameter λ_q and prior λ_0
+    η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
+    λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
+    λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
+    λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+    # 2) Set Stable params
+    opt.stable_params = deepcopy(λ_iblr) # initialize stable point
+    # 3) Init Free Energy Optimization Parameters
+    eval_FE_window = Int64(floor(convergence_optimizer.max_iterations*convergence_optimizer.eval_FE_window))
+    burn_in_min = Int64(floor(convergence_optimizer.max_iterations*convergence_optimizer.burn_in_min))
+    burn_in_max = Int64(floor(convergence_optimizer.max_iterations*convergence_optimizer.burn_in_max))
+    FE_check = false
+    is_FE_converged = false
+    tolerance_mean = convergence_optimizer.tolerance_mean
+    tolerance_median = convergence_optimizer.tolerance_median
+    λ_iblr_best = deepcopy(λ_iblr)
+
+    FE_max_threshold = 0.0
+
+    for i=1:convergence_optimizer.max_iterations
+        q = bcToStandardDist(msg_in.dist,λ_iblr)
+        z_s = sample(q)
+        g_i = df_m(z_s)
+        H_i=  df_H(z_s)
+        g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
+        g_μ_2= -H_i+η[2]-λ_iblr[2]
+        g̃=[g_μ_1;g_μ_2]
+        update!(opt,λ_iblr,g̃,msg_in.dist)
+        if 1<= i<=burn_in_min
+            FE_max_threshold += KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
+            if i == burn_in_min
+                stats.F_best = FE_max_threshold/(burn_in_min)
+                stats.F_prev = deepcopy(stats.F_best)
+                stats.F_best_idx = burn_in_min
+            end
+        # End of burn in period
+        elseif mod(i,eval_elbo_window) == 0
+            FE = KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
+            #First condition to start tests: FE is smaller than initial FE
+            if FE_check == false && FE < stats.F_best
+                FE_check = true # FE dropped below initial ELBO
+                println("FE_check starts when i=$i")
+            #Second condition to start tests: i exceeds burn_in_max period
+            elseif FE_check == false && i > burn_in_max
+                FE_check = true
+                println("FE_check starts when i=$i")
+            end
+            # If tests start, check convergence
+            if FE_check
+                is_FE_converged = ΔFE_check!(stats,FE,i,tolerance_mean,tolerance_median)
+                # Store λ yielding minimum Free Energy
+                if stats.F_best_idx == i
+                    λ_iblr_best = deepcopy(λ_iblr)
+                end
+            end
+            # If converged, stop iterations
+            if is_FE_converged
+                println("Algorithm converged at iteration $i")
+                break
+            end
+        end
+    end
+    if is_FE_converged
+        # return best iterate
+        λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr_best)
+    else
+        #return last iterate
+        λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
+    end
+end
+
+
+
+
+
+
+
 #---
-
-FE_stats()=FE_stats(Inf,Inf,-1,-1,Inf,Vector{Float64}(),Vector{Float64}())
-
-
-function ΔFE_check!(stats::FE_stats,F_now::Float64,idx_now::Int64,tolerance::Float64)
+function ΔFE_check!(stats::ConvergenceStatsFE,F_now::Float64,idx_now::Int64,tolerance::Float64)
+    ΔFE_check!(stats,F_now,idx_now,tolerance,tolerance)
+end
+function ΔFE_check!(stats::ConvergenceStatsFE,F_now::Float64,idx_now::Int64,tolerance_mean::Float64,tolerance_median::Float64)
     # Return true if Free Energy is converged, return false else
     push!(stats.FE_vect,F_now)
     if F_now < stats.F_best
@@ -253,7 +554,7 @@ function ΔFE_check!(stats::FE_stats,F_now::Float64,idx_now::Int64,tolerance::Fl
     # Calculate mean/median
     vect_mean = mean(stats.ΔF_vect)
     vect_median = median(stats.ΔF_vect)
-    if vect_mean < tolerance || vect_median < tolerance
+    if vect_mean < tolerance_mean || vect_median < tolerance_median
         stats.F_converge_idx = deepcopy(idx_now)
         stats.F_prev = deepcopy(F_now) #Also becomes F at convergence
         return true
@@ -303,6 +604,7 @@ function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Univari
             params = deepcopy(opt.stable_params)
         end
     end
+    return params
 end
 # update method for iBLR_AdaGrad, Univariate Gaussian case
 function update!(opt::iBLR_AdaGrad,params,natgrad,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
