@@ -183,7 +183,10 @@ mutable struct iBLR
     state::Int64
     stable_params::Any
 end
-
+mutable struct iBLR_AdaGrad
+    field::Any
+end
+iBLR(eta)=iBLR(eta,1,nothing)
 #--- Struct definitions
 abstract type ConvergenceOptimizer end
 Base.@kwdef mutable struct DefaultOptim <: ConvergenceOptimizer
@@ -200,6 +203,7 @@ Base.@kwdef mutable struct ConvergenceStatsFE
 end # struct
 Base.@kwdef mutable struct ConvergenceParamsFE <: ConvergenceOptimizer
     max_iterations::Int64
+    eval_FE_window::Float64
     burn_in_min ::Float64
     burn_in_max ::Float64
     tolerance_mean ::Float64
@@ -222,6 +226,7 @@ Base.@kwdef mutable struct StepSizeParams
     stepsize_update_func::Function
 end # struct
 Base.@kwdef mutable struct ParamStr2
+    is_initialized::Bool
     eta::Float64
     state::Int64
     stable_params::Union{Vector,Nothing}
@@ -285,7 +290,7 @@ function ConvergenceParamsFE(;kwargs...)
     defaults =(max_iterations= Int64(1e6),
             eval_FE_window=0.002,
             burn_in_min = 0.05,
-            burn_in_max = 0.15,
+            burn_in_max = 0.5,
             tolerance_mean = 0.1,
             tolerance_median = 0.1,
             stats=ConvergenceStatsFE())
@@ -363,21 +368,32 @@ function ParamStr2(x::Dict)
     have_all_keys_params = check_all_keys(x,ParamStr2)
     if have_all_keys_params
         # This code will run eventually from other outer constructors which provide x::Dict with all fields
-        return ParamStr2(x[:eta],x[:state],x[:stable_params],x[:convergence_algo],x[:auto_init_stepsize],x[:convergence_optimizer],x[:stepsize_optimizer])
+        x[:is_initialized] =false # Always false when constructed
+        return ParamStr2(x[:is_initialized],x[:eta],x[:state],x[:stable_params],x[:convergence_algo],x[:auto_init_stepsize],x[:convergence_optimizer],x[:stepsize_optimizer])
     else
         return ParamStr2(;x...) # refer to different outer constructor
     end
 end
 
 function ParamStr2(;kwargs...)
-
-    defaults = (eta = 0.0,state=1,stable_params=nothing,convergence_algo="free_energy",auto_init_stepsize=true,
+    defaults = (is_initialized=false,eta = 0.0,state=1,stable_params=nothing,convergence_algo="free_energy",auto_init_stepsize=true,
             convergence_optimizer=ConvergenceParamsFE(),
             stepsize_optimizer=StepSizeParams())
+    if haskey(kwargs,:eta) # If eta is set, stepsize is manually set
+        kwargs = (kwargs...,auto_init_stepsize=false)
+    end
     ntuple= merge(defaults,kwargs)
     settings = Dict(pairs(ntuple))
     convergence_algo_str = settings[:convergence_algo]
-    # 1) Check convergence algo string to determine convergence_optimizer type
+    # 1) Check if initial stepsize is given, otherwise determine it by Auto (Wolfe Condition)
+    if !settings[:auto_init_stepsize]
+        # Assert that user did not specify an invalid stepsize
+        # TODO: Maybe negative stepsize should be asserted along with 0.0 stepsize
+        settings[:eta] == 0.0 ? throw(ArgumentError("Stepsize ':eta' cannot be $(settings[:eta]) when step size is manually provided.")) : nothing
+    else
+        nothing #Determine by Wolfe Condition
+    end
+    # 2) Check convergence algo string to determine convergence_optimizer type
     if convergence_algo_str == "free_energy"
         if ! (typeof(settings[:convergence_optimizer]) == ConvergenceParamsFE) #throw error since this is the default choice
             throw(ArgumentError("Invalid choice of optimizer ($convergence_optimizer) for the given convergence algorithm."))
@@ -389,14 +405,6 @@ function ParamStr2(;kwargs...)
         optim_alias = DefaultOptim
     else
         throw(ArgumentError("Invalid string ('$convergence_algo_str') for convergence algorithm specification"))
-    end
-    # 2) Check if initial stepsize is given, otherwise determine it by Auto (Wolfe Condition)
-    if !settings[:auto_init_stepsize]
-        # Assert that user did not specify an invalid stepsize
-        # TODO: Maybe negative stepsize should be asserted along with 0.0 stepsize
-        settings[:eta] == 0.0 ? throw(ArgumentError("Stepsize ':eta' cannot be $(settings[:eta]) when step size is manually provided.")) : nothing
-    else
-        nothing #Determine by Wolfe Condition
     end
         #Init Optim struct
         optimizer = optim_alias(settings)
@@ -412,7 +420,7 @@ function inexactLineSearch()
     #TODO: Implement WolfeConditons for inexactLineSearch
     return 1.0
 end
-function renderCVI_master(logp_nc::Function,
+function renderCVI(logp_nc::Function,
                    num_iterations::Int,
                    opt::ParamStr2,
                    λ_init::Vector,
@@ -432,26 +440,23 @@ function renderCVI_master(logp_nc::Function,
             stepsize_optimizer.init_stepsize = deepcopy(opt.eta)
             stepsize_optimizer.current_stepsize = deepcopy(opt.eta)
         end
+        opt.is_initialized = true
     end
     # # 2) Initialize parameter λ_q and prior λ_0
-    # η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
-    # λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
-    # λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
-    # λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
     # # 3) Set Stable params
-    # opt.stable_params = deepcopy(λ_iblr) # initialize stable point
     # 4) Run Optimization Loop depending on the type of ConvergenceOptimizer
     if typeof(convergence_optimizer) == ConvergenceParamsFE
-        renderCVI_ΔFE(logp_nc,opt,λ_iblr,msg_in)
+        λ_natural_posterior = renderCVI_ΔFE(logp_nc,opt,λ_init,msg_in)
     elseif typeof(convergence_optimizer) == ConvergenceParamsMC
-        renderCVI_MCMC()
-    elseif typeof(convergence_optimizer) == DefaultOptimizer
-        renderCVI_Default()
+        λ_natural_posterior = renderCVI_MCMC(logp_nc,opt,λ_init,msg_in)
+    elseif typeof(convergence_optimizer) == DefaultOptim
+        #TODO : CHANGE THIS FUNCTION to renderCVI_Default
+        λ_natural_posterior=renderCVI(logp_nc,convergence_optimizer.max_iterations,iBLR(opt.eta),λ_init,msg_in)
     else
         throw(ArgumentError("Invalid convergence_optimizer($convergence_optimizer)"))
     end
 
-
+    return λ_natural_posterior
 end
 
 function renderCVI_ΔFE(logp_nc::Function,
@@ -460,7 +465,12 @@ function renderCVI_ΔFE(logp_nc::Function,
                    msg_in::Message{<:Gaussian, Univariate})
 
     convergence_optimizer = opt.convergence_optimizer
+    # RESET STATS
+    convergence_optimizer.stats = ConvergenceStatsFE()
     stats = convergence_optimizer.stats
+    #
+    df_m(z) = ForwardDiff.derivative(logp_nc,z)
+    df_H(z) = ForwardDiff.derivative(df_m,z)
     # 1) Initialize parameter λ_q and prior λ_0
     η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
     λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
@@ -476,7 +486,7 @@ function renderCVI_ΔFE(logp_nc::Function,
     is_FE_converged = false
     tolerance_mean = convergence_optimizer.tolerance_mean
     tolerance_median = convergence_optimizer.tolerance_median
-    λ_iblr_best = deepcopy(λ_iblr)
+    #λ_iblr_best = Vector{Float64}(undef,2)
 
     FE_max_threshold = 0.0
 
@@ -490,23 +500,24 @@ function renderCVI_ΔFE(logp_nc::Function,
         g̃=[g_μ_1;g_μ_2]
         update!(opt,λ_iblr,g̃,msg_in.dist)
         if 1<= i<=burn_in_min
-            FE_max_threshold += KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
+            FE = KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
+            FE_max_threshold += FE
             if i == burn_in_min
                 stats.F_best = FE_max_threshold/(burn_in_min)
                 stats.F_prev = deepcopy(stats.F_best)
                 stats.F_best_idx = burn_in_min
             end
         # End of burn in period
-        elseif mod(i,eval_elbo_window) == 0
+        elseif mod(i,eval_FE_window) == 0
             FE = KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
             #First condition to start tests: FE is smaller than initial FE
             if FE_check == false && FE < stats.F_best
                 FE_check = true # FE dropped below initial ELBO
-                println("FE_check starts when i=$i")
+                println("FE ($FE) is smaller now,FE_check starts when i=$i")
             #Second condition to start tests: i exceeds burn_in_max period
             elseif FE_check == false && i > burn_in_max
                 FE_check = true
-                println("FE_check starts when i=$i")
+                println("Burninmax reached ($burn_in_max), FE_check starts when i=$i")
             end
             # If tests start, check convergence
             if FE_check
@@ -523,17 +534,79 @@ function renderCVI_ΔFE(logp_nc::Function,
             end
         end
     end
-    if is_FE_converged
+    if is_FE_converged && @isdefined λ_iblr_best
         # return best iterate
         λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr_best)
     else
         #return last iterate
         λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
     end
+    return λ_natural_posterior
 end
+function update!(opt::ParamStr2,params::Vector,natgrad::Vector,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
+    #TODO:#1) Use StepSizeParams's stepsize for update
+    #TODO #2) Update currentstepsize after each iteration
+    #params = [μ,S]
+    if any(isnan.(natgrad)) || any(isinf.(natgrad))
+        params = deepcopy(opt.stable_params)
+        return # no update
+    else
+        opt.stable_params = deepcopy(params)
+    end
+    params[1] += opt.eta*natgrad[1]
+    params[2] += opt.eta*natgrad[2]+0.5*(opt.eta*natgrad[2])^2/params[2]
+    if isProper(bcToStandardDist(prior,params)) == false
+        # not proper after update
+        params = deepcopy(opt.stable_params)
+    end
+    return params
+end
+function renderCVI_MCMC(logp_nc::Function,
+                   opt::ParamStr2,
+                   λ_init::Vector,
+                   msg_in::Message{<:Gaussian, Univariate})
+
+    convergence_optimizer = opt.convergence_optimizer
+    #
+    df_m(z) = ForwardDiff.derivative(logp_nc,z)
+    df_H(z) = ForwardDiff.derivative(df_m,z)
+    # 1) Initialize parameter λ_q and prior λ_0
+    η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
+    λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
+    λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
+    λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+    # 2) Set Stable params
+    opt.stable_params = deepcopy(λ_iblr) # initialize stable point
 
 
-
+    W = convergence_optimizer.mcmc_window_len
+    J = convergence_optimizer.mcmc_num_chains
+    max_iter = Int64(floor(convergence_optimizer.max_iterations/W))
+    simulations_done = 0
+    is_mcmc_converged= false
+    #First one
+    last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Int64(W),opt,η,λ_iblr,logp_nc,true,msg_in)
+    for iter= 2:max_iter
+        last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Int64(W),opt_matrix,η,last_params,logp_nc,false,msg_in)
+        if all(stats_dict[:rhat] .< convergence_optimizer.rhat_cutoff)
+            simulations_done = iter
+            break
+        end
+    end
+    for i=simulations_done:max_iter
+        last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Int64(W),opt_matrix,η,last_params,logp_nc,false,msg_in)
+        # Check MCSE and ESS
+        if all(stats_dict[:mcse] .< convergence_optimizer.mcse_cutoff) && all(stats_dict[:ess] .> convergence_optimizer.ess_threshold)
+            is_mcmc_converged = true
+            println("Converged Parameters using Iterate Averaging = $(stats_dict[:λ_bar])")
+            break
+        end
+    end
+    if !is_mcmc_converged
+        println("Warning! The algorithm might not have been converged!")
+    end
+    return bcToNaturalParams(msg_in.dist,stats_dict[:λ_bar])
+end
 
 
 
@@ -554,7 +627,7 @@ function ΔFE_check!(stats::ConvergenceStatsFE,F_now::Float64,idx_now::Int64,tol
     # Calculate mean/median
     vect_mean = mean(stats.ΔF_vect)
     vect_median = median(stats.ΔF_vect)
-    if vect_mean < tolerance_mean || vect_median < tolerance_median
+    if (vect_mean < tolerance_mean && length(stats.ΔF_vect)>20) || (vect_median < tolerance_median && length(stats.ΔF_vect)>20)
         stats.F_converge_idx = deepcopy(idx_now)
         stats.F_prev = deepcopy(F_now) #Also becomes F at convergence
         return true
