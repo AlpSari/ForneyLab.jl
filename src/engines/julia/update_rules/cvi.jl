@@ -198,27 +198,27 @@ Base.@kwdef mutable struct ConvergenceStatsFE
     F_best_idx::Int64 # Index of Minimum attained FE
     F_converge_idx::Int64 # Index of Minimum attained FE
     ΔF_rel::Float64 # Relative difference between F_now and F_prev
-    ΔF_vect::Vector{Float64}
+    ΔF_vect::Vector{Float64} # Relative difference vector
     FE_vect::Vector{Float64}#TODO: delete this field later, this is for debugging
 end # struct
 Base.@kwdef mutable struct ConvergenceParamsFE <: ConvergenceOptimizer
-    max_iterations::Int64
-    eval_FE_window::Float64
-    burn_in_min ::Float64
-    burn_in_max ::Float64
-    tolerance_mean ::Float64
-    tolerance_median ::Float64
-    stats::ConvergenceStatsFE #NEW
+    max_iterations::Int64 # max number of iterations
+    eval_FE_window::Float64 # to calculate FE every  'eval_FE_window'th iteration
+    burn_in_min::Float64  # min number of samples burned (percentage)
+    burn_in_max::Float64 # max number of samples burned (percentage)
+    tolerance_mean::Float64 # mean threshold
+    tolerance_median::Float64 # median threshold
+    stats::ConvergenceStatsFE # struct holding information about convergence checks
 end # struct
 Base.@kwdef mutable struct ConvergenceParamsMC <: ConvergenceOptimizer
-    max_iterations::Int64
-    pareto_k_thr ::Float64
-    pareto_num_samples ::Float64
-    mcmc_num_chains ::Int64
-    mcmc_window_len ::Float64
-    rhat_cutoff ::Float64
-    mcse_cutoff ::Float64
-    ess_threshold ::Float64
+    max_iterations::Int64 # max number of iterations
+    pareto_k_thr::Float64 # Pareto diagnostic threshold for scale parameter k
+    pareto_num_samples::Float64 # Num of samples used for Pareto diagnostic
+    mcmc_num_chains::Int64 # Num of chains in MCMC simulation
+    mcmc_window_len::Float64 # Window length in MCMC simulation
+    rhat_cutoff::Float64 # Rhat maximum value
+    mcse_cutoff::Float64 # Monte Carlo Standard Error maximum value
+    ess_threshold::Float64 # Effective Sample Size minimum value
 end # struct
 Base.@kwdef mutable struct StepSizeParams
     init_stepsize::Float64
@@ -228,7 +228,7 @@ end # struct
 Base.@kwdef mutable struct ParamStr2
     is_initialized::Bool
     eta::Float64
-    state::Int64
+    state::Int64 #TODO: Delete later
     stable_params::Union{Vector,Nothing}
     convergence_algo::String # Determines the convergence algorithm
     auto_init_stepsize::Bool # Determines the initial stepsize
@@ -320,7 +320,7 @@ function ConvergenceParamsMC(;kwargs...)
         mcmc_window_len= 500,
         rhat_cutoff= 1.2,
         mcse_cutoff= 1.0,
-        ess_threshold= 100.0)
+        ess_threshold= 90.0)
     ntuple= merge(defaults,kwargs)
     settings = Dict(pairs(ntuple))
     return ConvergenceParamsMC(settings)
@@ -441,6 +441,9 @@ function renderCVI(logp_nc::Function,
             stepsize_optimizer.current_stepsize = deepcopy(opt.eta)
         end
         opt.is_initialized = true
+    else
+        # Reset the step size to initial value
+        stepsize_optimizer.current_stepsize = deepcopy(stepsize_optimizer.init_stepsize)
     end
     # # 2) Initialize parameter λ_q and prior λ_0
     # # 3) Set Stable params
@@ -464,18 +467,14 @@ function renderCVI_ΔFE(logp_nc::Function,
                    λ_init::Vector,
                    msg_in::Message{<:Gaussian, Univariate})
 
+
+    g̃_func = calcNatGradBC_func(logp_nc,msg_in.dist)
     convergence_optimizer = opt.convergence_optimizer
-    # RESET STATS
-    convergence_optimizer.stats = ConvergenceStatsFE()
+    convergence_optimizer.stats = ConvergenceStatsFE() # RESET STATS
     stats = convergence_optimizer.stats
-    #
-    df_m(z) = ForwardDiff.derivative(logp_nc,z)
-    df_H(z) = ForwardDiff.derivative(df_m,z)
     # 1) Initialize parameter λ_q and prior λ_0
-    η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
-    λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
-    λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
-    λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+    λ_iblr = naturalToBCParams(msg_in.dist,λ_init)
+    η = bcParams(msg_in.dist)
     # 2) Set Stable params
     opt.stable_params = deepcopy(λ_iblr) # initialize stable point
     # 3) Init Free Energy Optimization Parameters
@@ -486,18 +485,10 @@ function renderCVI_ΔFE(logp_nc::Function,
     is_FE_converged = false
     tolerance_mean = convergence_optimizer.tolerance_mean
     tolerance_median = convergence_optimizer.tolerance_median
-    #λ_iblr_best = Vector{Float64}(undef,2)
-
     FE_max_threshold = 0.0
-
     for i=1:convergence_optimizer.max_iterations
-        q = bcToStandardDist(msg_in.dist,λ_iblr)
-        z_s = sample(q)
-        g_i = df_m(z_s)
-        H_i=  df_H(z_s)
-        g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
-        g_μ_2= -H_i+η[2]-λ_iblr[2]
-        g̃=[g_μ_1;g_μ_2]
+        z_s = sampleBCDist(msg_in.dist,λ_iblr)
+        g̃ = g̃_func(z_s,λ_iblr)
         update!(opt,λ_iblr,g̃,msg_in.dist)
         if 1<= i<=burn_in_min
             FE = KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
@@ -567,9 +558,7 @@ function renderCVI_MCMC(logp_nc::Function,
                    msg_in::Message{<:Gaussian, Univariate})
 
     convergence_optimizer = opt.convergence_optimizer
-    #
-    df_m(z) = ForwardDiff.derivative(logp_nc,z)
-    df_H(z) = ForwardDiff.derivative(df_m,z)
+
     # 1) Initialize parameter λ_q and prior λ_0
     η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
     λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
@@ -584,31 +573,83 @@ function renderCVI_MCMC(logp_nc::Function,
     max_iter = Int64(floor(convergence_optimizer.max_iterations/W))
     simulations_done = 0
     is_mcmc_converged= false
-    #First one
+    # First simulation
     last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Int64(W),opt,η,λ_iblr,logp_nc,true,msg_in)
-    for iter= 2:max_iter
+    # Rest of simulations until finding stationary distribution
+    for i= 2:max_iter
         last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Int64(W),opt_matrix,η,last_params,logp_nc,false,msg_in)
         if all(stats_dict[:rhat] .< convergence_optimizer.rhat_cutoff)
-            simulations_done = iter
+            simulations_done = i
             break
         end
     end
-    for i=simulations_done:max_iter
-        last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Int64(W),opt_matrix,η,last_params,logp_nc,false,msg_in)
-        # Check MCSE and ESS
-        if all(stats_dict[:mcse] .< convergence_optimizer.mcse_cutoff) && all(stats_dict[:ess] .> convergence_optimizer.ess_threshold)
-            is_mcmc_converged = true
-            println("Converged Parameters using Iterate Averaging = $(stats_dict[:λ_bar])")
-            break
+
+    if simulations_done==0
+        # Stationary is not achived with given number of iterations, warn the user
+        println("Warning! The algorithm might not have been converged!
+         The stationary distribution was not found! VI result might be inaccurate!")
+        return bcToNaturalParams(msg_in.dist,stats_dict[:λ_bar])
+    else
+        # Below are the simulations with stationary distribution
+        λ_IA = zeros(2,) #Distribution specific
+        for i=simulations_done:max_iter
+            last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Int64(W),opt_matrix,η,last_params,logp_nc,false,msg_in)
+            λ_IA += stats_dict[:λ_bar] # accumulate
+
+            # Check MCSE and ESS
+            if all(stats_dict[:mcse] .< convergence_optimizer.mcse_cutoff) && all(stats_dict[:ess] .> convergence_optimizer.ess_threshold)
+                is_mcmc_converged = true
+                simulations_done = i
+                λ_IA = λ_IA/simulations_done #take average
+                println("Converged Parameters using Iterate Averaging = $λ_IA")
+                break
+            end
+        end
+        if is_mcmc_converged
+            return bcToNaturalParams(msg_in.dist,λ_IA)
+        else
+            S = Int64(convergence_optimizer.pareto_num_samples)
+            _,k̂_new,_  = Pareto_k_fit(logp_nc,msg_in,stats_dict[:λ_bar],S)
+            if k̂_new >= convergence_optimizer.pareto_k_thr
+                println("Pareto shape parameter k fit is k=$k>$(convergence_optimizer.pareto_k_thr),
+                 VI algorithm might not have been converged!")
+            end
+            println("Warning! The algorithm might not have been converged!
+             MCSE and ESS conditions were not satisfied!")
+            return bcToNaturalParams(msg_in.dist,stats_dict[:λ_bar])
         end
     end
-    if !is_mcmc_converged
-        println("Warning! The algorithm might not have been converged!")
-    end
-    return bcToNaturalParams(msg_in.dist,stats_dict[:λ_bar])
 end
 
+## Distribution Specific Functions
 
+function calcFEBCParams(z_s,dist::ProbabilityDistribution{Univariate, F}) where F<:Gaussian
+
+end
+function naturalToBCParams(dist::ProbabilityDistribution{Univariate, F},η::Vector) where F<:Gaussian
+    λ_bc = Vector{Float64}(undef,2) # Posterior BC parameter vector
+    λ_bc[2] = deepcopy(-2*η[2]) # Precision
+    λ_bc[1] = deepcopy(η[1]/λ_bc[2]) # Mean
+    return λ_bc
+end
+function sampleBCDist(dist::ProbabilityDistribution{Univariate, F},λ_bc::Vector{Float64},n_samples::Int64=1) where F<: Gaussian
+    q = bcToStandardDist(dist,λ_bc)
+    if n_samples ==1
+        z_s =sample(q)
+    else
+        z_s= sample(q,n_samples)
+    end
+    return z_s
+end
+function calcNatGradBC_func(logp_nc::Function,dist::ProbabilityDistribution{Univariate, F}) where F<: Gaussian
+    df_m(z) = ForwardDiff.derivative(logp_nc,z)
+    df_H(z) = ForwardDiff.derivative(df_m,z)
+    η = deepcopy(bcParams(dist)) # Prior BC parameters
+    g_μ_1(z,λ) = (df_m(z)+η[2]*(η[1]-λ[1]))/λ[2]
+    g_μ_2(z,λ)= -df_H(z)+η[2]-λ[2]
+    g̃(z,λ)=[g_μ_1(z,λ);g_μ_2(z,λ)]
+    return g̃
+end
 
 
 #---
