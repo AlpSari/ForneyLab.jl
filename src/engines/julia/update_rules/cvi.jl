@@ -739,7 +739,7 @@ function renderCVI_MCMC(logp_nc::Function,
 
     is_stationary_achieved = false
     is_mcmc_converged= false
-    λ_IA = initBCParams(msg_in.dist) #Distribution specific
+    λ_IA = initBCParams(msg_in.dist) #Distribution specific --> All zeros
     stationary_counter = 0
 
     # First simulation
@@ -843,9 +843,11 @@ function naturalToBCParams(dist::ProbabilityDistribution{Multivariate, F},η::Ve
 end
 
 function initBCParams(dist::ProbabilityDistribution{Univariate, F}) where F<:Gaussian
+    # everything must be 0 since this is used for accumulation
     return  zeros(2,)
 end
 function initBCParams(dist::ProbabilityDistribution{Multivariate, F}) where F<:Gaussian
+    # everything must be 0 since this is used for accumulation
     d= dims(dist)
     μ = zeros(d,)
     S = zeros(d,d)
@@ -977,10 +979,23 @@ end
 
 
 function bcToNaturalParams(dist::ProbabilityDistribution{Univariate, F}, η::Vector) where F<:Gaussian
-    λ = [η[2]*η[1],-0.5*η[2]]
+    if length(η) !=2
+        throw(ArgumentError("Length of input vector must be 2([μ,S]) for BC parameterization!"))
+    else
+        λ = [η[2]*η[1],-0.5*η[2]]
+    end
+    return λ
 end
 function bcToNaturalParams(dist::ProbabilityDistribution{Multivariate, F}, η::Vector) where F<:Gaussian
-    λ = [η[2]*η[1];vec(-0.5*η[2])]
+    d = dims(dist)
+    if length(η) !=3
+        throw(ArgumentError("Length of input vector must be 3 ([μ,S,Σ]) for BC parameterization!"))
+    elseif size(η[2]) != (d,d)
+        throw(ArgumentError("Dimension mismatch for the precision parameter $(size(η[2])) != $((d,d)) for a multivariate distribution with dimension $d"))
+    else
+        λ = [η[2]*η[1];vec(-0.5*η[2])]
+    end
+    return  λ
 end
 # update method for iBLR, Univariate Gaussian case
 function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian

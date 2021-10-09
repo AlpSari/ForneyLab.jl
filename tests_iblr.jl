@@ -4,6 +4,7 @@ using ForneyLab
 using LinearAlgebra:norm
 using ForneyLab: DefaultOptim, ConvergenceStatsFE,ConvergenceParamsFE,ConvergenceParamsMC
 using ForneyLab: check_all_keys,adaptStepSize,ΔFE_check!,oneWindowSimulation_MCMC,Pareto_k_fit,renderCVI
+using ForneyLab: bcParams,naturalToBCParams,initBCParams,bcToStandardDist,sampleBCDist,calcNatGradBC_func,KL_bc,getStatisticsIndexMC,update!,bcToNaturalParams
 using ForneyLab: ParamStr2
 
 @testset "Types" begin
@@ -63,7 +64,6 @@ end # begin
     @test check_all_keys(Dict(:x=>3,:y=>2,:z=>"a"),TestStruct) == true
     @test check_all_keys(Dict(:x=>3,:y=>2,:z=>"a",:t=>3),TestStruct) == true
 end # begin
-
 @testset "CommonMainFunctions" begin
     @testset "adaptStepSize" begin
         opt = ParamStr2(current_stepsize=1.0,stepsize_update="none");adaptStepSize(opt);
@@ -80,8 +80,6 @@ end # begin
         @test ΔFE_check!(stats,F_now,idx_now,tolerance) in [true,false]
     end
 end # begin
-
-
 
 @testset "Univariate Gaussian" begin
     λ_bc=[1.0,2.0] #Bc
@@ -108,12 +106,30 @@ end # begin
             opt = ParamStr2(max_iterations=num_iterations,convergence_algo = str)
             λ_posterior = renderCVI(logp_nc,num_iterations,opt,λ_natural,msg_in)
             @test isa(λ_posterior,Vector)
+            @test length(λ_posterior) == length(λ_natural)
         end
     end
+
+    # Distribution related functions
+    @test bcParams(ProbabilityDistribution(Univariate, GaussianMeanPrecision, m=3.0, w=4.0)) ==[3.0,4.0]
+    @test naturalToBCParams(msg_in.dist,λ_natural) == λ_bc
+    @test initBCParams(msg_in.dist) == [0.0,0.0]
+    @test bcToStandardDist(msg_in.dist,[3.0,4.0]) == ProbabilityDistribution(Univariate, GaussianWeightedMeanPrecision, xi=12.0, w=4.0)
+    @test isa(sampleBCDist(msg_in.dist,λ_bc,1),Float64)
+    @test isa(sampleBCDist(msg_in.dist,λ_bc,10),Vector{Float64})
+    @test isa(calcNatGradBC_func(logp_nc,msg_in.dist),Function)
+    @test KL_bc(λ_bc,λ_bc,msg_in.dist) == 0
+    @test KL_bc(λ_bc,2*λ_bc,msg_in.dist) != 0
+    @test isa(KL_bc(λ_bc,λ_bc,msg_in.dist),Float64)
+    @test getStatisticsIndexMC(msg_in.dist) ==(1,1:1)
+    @test update!(ParamStr2(current_stepsize=0.7),deepcopy(λ_bc),[0.0,0.0],msg_in.dist) == λ_bc
+    @test update!(ParamStr2(current_stepsize=0.7),deepcopy(λ_bc),[1.0,0.0],msg_in.dist) != λ_bc
+    @test bcToNaturalParams(msg_in.dist,λ_bc) == λ_natural
+    @test_throws ArgumentError bcToNaturalParams(msg_in.dist,[3.0,4.0,1.0]) #invalid length of input vector
 end
 
 @testset "Multivariate Gaussian" begin
-    d = 3
+    d = 5
     λ_bc=[ones(d,),diageye(d),diageye(d)]
     msg_in = Message(Multivariate, GaussianWeightedMeanPrecision,xi=λ_bc[2]*λ_bc[1],w=λ_bc[2])
     λ_natural = naturalParams(msg_in.dist)
@@ -137,8 +153,26 @@ end
             opt = ParamStr2(max_iterations=num_iterations,convergence_algo = str)
             λ_posterior = renderCVI(logp_nc,num_iterations,opt,λ_natural,msg_in)
             @test isa(λ_posterior,Vector)
+            @test length(λ_posterior) == length(λ_natural)
         end
     end
+    # Distribution related functions
+    @test bcParams(ProbabilityDistribution(Multivariate, GaussianMeanPrecision, m=[3.0;4.0], w=[1 2.0;3 4])) ==[[3.0;4.0],[1 2.0;3 4],cholinv([1 2.0;3 4])]
+    @test naturalToBCParams(msg_in.dist,λ_natural) == λ_bc
+    @test initBCParams(msg_in.dist) == [zeros(d,),zeros(d,d),zeros(d,d)]
+    @test bcToStandardDist(msg_in.dist,λ_bc) == standardMessage(msg_in.dist,λ_natural).dist
+    @test isa(sampleBCDist(msg_in.dist,λ_bc,1),Vector{Float64})
+    @test isa(sampleBCDist(msg_in.dist,λ_bc,10),Vector{Vector{Float64}})
+    @test isa(calcNatGradBC_func(logp_nc,msg_in.dist),Function)
+    @test KL_bc(λ_bc,λ_bc,msg_in.dist) == 0
+    @test KL_bc(λ_bc,2*λ_bc,msg_in.dist) != 0
+    @test isa(KL_bc(λ_bc,λ_bc,msg_in.dist),Float64)
+    @test getStatisticsIndexMC(msg_in.dist) ==(1,1:d)
+    @test update!(ParamStr2(current_stepsize=0.7),deepcopy(λ_bc),[zeros(d,),zeros(d,d)],msg_in.dist) == λ_bc
+    @test update!(ParamStr2(current_stepsize=0.7),deepcopy(λ_bc),[ones(d,),zeros(d,d)],msg_in.dist) != λ_bc
+    @test bcToNaturalParams(msg_in.dist,λ_bc) == λ_natural
+    @test_throws ArgumentError bcToNaturalParams(msg_in.dist,[3.0,4.0,1.0])  #invalid precision matrix
+    @test_throws ArgumentError bcToNaturalParams(msg_in.dist,[[1.0],[2.0],[3.0],[4.0]]) #invalid precision matrix
 end
 
 
