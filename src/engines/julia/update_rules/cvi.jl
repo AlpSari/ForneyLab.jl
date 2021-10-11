@@ -176,16 +176,7 @@ end
 import StatsBase:percentile,autocor
 import Flux.Optimise:update!
 import Statistics:median,var
-# Additional definitions for iBLR implementation of CVI
-mutable struct iBLR
-    eta::Float64
-    state::Int64
-    stable_params::Any
-end
-mutable struct iBLR_AdaGrad
-    field::Any
-end
-iBLR(eta)=iBLR(eta,1,nothing)
+
 #--- Struct definitions
 abstract type ConvergenceOptimizer end
 Base.@kwdef mutable struct DefaultOptim <: ConvergenceOptimizer
@@ -219,11 +210,6 @@ Base.@kwdef mutable struct ConvergenceParamsMC <: ConvergenceOptimizer
     mcse_cutoff::Float64 # Monte Carlo Standard Error maximum value
     ess_threshold::Float64 # Effective Sample Size minimum value
 end # struct
-# Base.@kwdef mutable struct StepSizeParams
-#     init_stepsize::Float64
-#     current_stepsize::Float64
-#     stepsize_update_func::Function
-# end # struct
 Base.@kwdef mutable struct ParamStr2
     is_initialized::Bool
     eta::Float64
@@ -235,7 +221,7 @@ Base.@kwdef mutable struct ParamStr2
     current_stepsize::Float64
     stepsize_update::String
     iteration_counter::Int64
-
+    verbose::Bool
 end
 
 #--- Helper functions for struct initalizations
@@ -350,16 +336,16 @@ function ParamStr2(x::Dict)
         # This code will run eventually from other outer constructors which provide x::Dict with all fields
         x[:is_initialized] =false # Always false when constructed
         return ParamStr2(x[:is_initialized],x[:eta],x[:state],x[:stable_params],
-        x[:convergence_algo],x[:auto_init_stepsize],x[:convergence_optimizer],x[:current_stepsize],x[:stepsize_update],x[:iteration_counter])
+        x[:convergence_algo],x[:auto_init_stepsize],x[:convergence_optimizer],
+        x[:current_stepsize],x[:stepsize_update],x[:iteration_counter],x[:verbose])
     else
         return ParamStr2(;x...) # refer to different outer constructor
     end
 end
-
 function ParamStr2(;kwargs...)
     defaults = (is_initialized=false,eta = 0.0,state=1,stable_params=nothing,convergence_algo="free_energy",auto_init_stepsize=true,
             convergence_optimizer=ConvergenceParamsFE(),
-            current_stepsize=0.0,stepsize_update="none",iteration_counter =0)
+            current_stepsize=0.0,stepsize_update="none",iteration_counter =0,verbose=false)
     if haskey(kwargs,:eta) # If eta is set, stepsize is manually set
         kwargs = (kwargs...,auto_init_stepsize=false)
     end
@@ -633,7 +619,9 @@ function renderCVI(logp_nc::Function,
 
     # 3) Check if iBLR is implemented for given msg_in
     if !(typeof(msg_in.dist) <: Union{ProbabilityDistribution{Multivariate,F},ProbabilityDistribution{Univariate,F}} where F<:Gaussian)
-        println("iBLR is not implemented for prior of type $(typeof(msg_in.dist)), using CVI update rule instead.")
+        if opt.verbose
+            println("iBLR is not implemented for prior of type $(typeof(msg_in.dist)), using CVI update rule instead.")
+        end
         λ_natural_posterior = renderCVI(logp_nc,convergence_optimizer.max_iterations,Descent(opt.current_stepsize),λ_init,msg_in)
     else
         if typeof(convergence_optimizer) == ConvergenceParamsFE
@@ -646,9 +634,6 @@ function renderCVI(logp_nc::Function,
             throw(ArgumentError("Invalid convergence_optimizer($convergence_optimizer)"))
         end
     end
-
-
-
     return λ_natural_posterior
 end
 function renderCVI_ΔFE(logp_nc::Function,
@@ -689,14 +674,19 @@ function renderCVI_ΔFE(logp_nc::Function,
         # End of burn in period
         elseif mod(i,eval_FE_window) == 0
             FE = KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
-            #First condition to start tests: FE is smaller than initial FE
+            # First condition to start tests: FE is smaller than initial FE
             if FE_check == false && FE < stats.F_best
                 FE_check = true # FE dropped below initial ELBO
-                println("FE ($FE) is smaller now,FE_check starts when i=$i")
-            #Second condition to start tests: i exceeds burn_in_max period
+                if opt.verbose
+                    println("FE ($FE) is smaller now,FE_check starts when i=$i")
+                end
+
+            # Second condition to start tests: i exceeds burn_in_max period
             elseif FE_check == false && i > burn_in_max
                 FE_check = true
-                println("Burninmax reached ($burn_in_max), FE_check starts when i=$i")
+                if opt.verbose
+                    println("Burninmax reached ($burn_in_max), FE_check starts when i=$i")
+                end
             end
             # If tests start, check convergence
             if FE_check
@@ -708,7 +698,9 @@ function renderCVI_ΔFE(logp_nc::Function,
             end
             # If converged, stop iterations
             if is_FE_converged
-                println("Algorithm converged at iteration $i")
+                if opt.verbose
+                    println("Algorithm converged at iteration $i")
+                end
                 break
             end
         end
@@ -768,24 +760,32 @@ function renderCVI_MCMC(logp_nc::Function,
     end
 
     if !is_stationary_achieved
-        println("Warning: Stationary Distribution is not achieved.
-         VI result might be inaccurate!")
+        if opt.verbose
+            println("Warning: Stationary Distribution is not achieved.
+             VI result might be inaccurate!")
+        end
          return bcToNaturalParams(msg_in.dist,stats_dict[:λ_bar])
     elseif is_mcmc_converged
-        println("VI converged.")
+        if opt.verbose
+            println("VI converged.")
+        end
         return bcToNaturalParams(msg_in.dist,λ_IA)
     else
         S = Int64(convergence_optimizer.pareto_num_samples)
         println("λ_IA=$λ_IA")
         k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_IA,S)
         if k̂_new >= convergence_optimizer.pareto_k_thr
-             println("Stationary distribution achieved but thresholds are not satisfied.
-             VI result might be inaccurate! Pareto scale parameter k̂ to importance ratios
-             are k̂=$k̂_new >=$(convergence_optimizer.pareto_k_thr)")
+            if opt.verbose
+                 println("Stationary distribution achieved but thresholds are not satisfied.
+                 VI result might be inaccurate! Pareto scale parameter k̂ to importance ratios
+                 are k̂=$k̂_new >=$(convergence_optimizer.pareto_k_thr)")
+            end
         else
-            println("Stationary distribution achieved,
-            Monte Carlo Standard Error and Effective Sample Size thresholds are not satisfied.
-            Pareto shape parameter k̂ fitted to importance ratios are k̂=$k̂_new")
+            if opt.verbose
+                println("Stationary distribution achieved,
+                Monte Carlo Standard Error and Effective Sample Size thresholds are not satisfied.
+                Pareto shape parameter k̂ fitted to importance ratios are k̂=$k̂_new")
+            end
         end
         return bcToNaturalParams(msg_in.dist,λ_IA)
     end
@@ -841,7 +841,25 @@ function naturalToBCParams(dist::ProbabilityDistribution{Multivariate, F},η::Ve
     λ_bc = [m_t,S_t,Σ_t] #Σ_t is appended since it is used several times
     return λ_bc
 end
-
+function bcToNaturalParams(dist::ProbabilityDistribution{Univariate, F}, η::Vector) where F<:Gaussian
+    if length(η) !=2
+        throw(ArgumentError("Length of input vector must be 2([μ,S]) for BC parameterization!"))
+    else
+        λ = [η[2]*η[1],-0.5*η[2]]
+    end
+    return λ
+end
+function bcToNaturalParams(dist::ProbabilityDistribution{Multivariate, F}, η::Vector) where F<:Gaussian
+    d = dims(dist)
+    if length(η) !=3
+        throw(ArgumentError("Length of input vector must be 3 ([μ,S,Σ]) for BC parameterization!"))
+    elseif size(η[2]) != (d,d)
+        throw(ArgumentError("Dimension mismatch for the precision parameter $(size(η[2])) != $((d,d)) for a multivariate distribution with dimension $d"))
+    else
+        λ = [η[2]*η[1];vec(-0.5*η[2])]
+    end
+    return  λ
+end
 function initBCParams(dist::ProbabilityDistribution{Univariate, F}) where F<:Gaussian
     # everything must be 0 since this is used for accumulation
     return  zeros(2,)
@@ -974,120 +992,6 @@ function update!(opt::ParamStr2,params::Vector,natgrad::Vector,prior::Probabilit
 end
 
 #---
-#TODO : WRITE TEST THAT ASSERTS LENGTH OF η VECTOR IN bcToNaturalParams or similar methods
-
-
-
-function bcToNaturalParams(dist::ProbabilityDistribution{Univariate, F}, η::Vector) where F<:Gaussian
-    if length(η) !=2
-        throw(ArgumentError("Length of input vector must be 2([μ,S]) for BC parameterization!"))
-    else
-        λ = [η[2]*η[1],-0.5*η[2]]
-    end
-    return λ
-end
-function bcToNaturalParams(dist::ProbabilityDistribution{Multivariate, F}, η::Vector) where F<:Gaussian
-    d = dims(dist)
-    if length(η) !=3
-        throw(ArgumentError("Length of input vector must be 3 ([μ,S,Σ]) for BC parameterization!"))
-    elseif size(η[2]) != (d,d)
-        throw(ArgumentError("Dimension mismatch for the precision parameter $(size(η[2])) != $((d,d)) for a multivariate distribution with dimension $d"))
-    else
-        λ = [η[2]*η[1];vec(-0.5*η[2])]
-    end
-    return  λ
-end
-# update method for iBLR, Univariate Gaussian case
-function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
-    #params = [μ,S]
-    if any(isnan.(natgrad)) || any(isinf.(natgrad))
-        # Gradients are non-numeric
-        if opt.state == 1 # Return to previous parameters which give numeric g̃
-            params = deepcopy(opt.stable_params)
-        end
-        return # no update
-    else
-        # Gradients are numeric
-        if opt.state ==1
-            opt.stable_params = deepcopy(params)
-        end
-    end
-    params[1] += opt.eta*natgrad[1]
-    params[2] += opt.eta*natgrad[2]+0.5*(opt.eta*natgrad[2])^2/params[2]
-
-    if isProper(bcToStandardDist(prior,params)) == false
-        # not proper after update
-        if opt.state == 1
-            params = deepcopy(opt.stable_params)
-        end
-    end
-    return params
-end
-# update method for iBLR_AdaGrad, Univariate Gaussian case
-function update!(opt::iBLR_AdaGrad,params,natgrad,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
-    #params = [μ,S]
-    if any(isnan.(natgrad)) || any(isinf.(natgrad))
-        # Gradients are non-numeric
-        if opt.state == 1 # Return to previous parameters which give numeric g̃
-            params = deepcopy(opt.stable_params)
-        end
-        return # no update
-    else
-        # Gradients are numeric
-        if opt.state ==1
-            opt.stable_params = deepcopy(params)
-        end
-    end
-
-    denominator = 1+(opt.grad_acc-1)^(0.5)
-    #denominator = (1.01)^(opt.grad_acc)
-    #opt.eta = opt.eta*0.95
-    params[1] += (opt.eta/denominator)*natgrad[1]
-    params[2] += (opt.eta/denominator)*natgrad[2]+0.5*((opt.eta/denominator)*natgrad[2])^2/params[2]
-    #println("Current β_t = $(opt.eta/denominator)")
-
-    if isProper(bcToStandardDist(prior,params)) == false
-        # not proper after update
-        if opt.state == 1
-            params = deepcopy(opt.stable_params)
-        end
-    end
-end
-# update method for iBLR, Multivariate Gaussian case
-function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Multivariate, F},s_inv::Array{Float64,2}) where F <: Gaussian
-    #params = [vec(μ),mat(S)]
-    any_nan_value = any(any.((x->isnan.(x)).(natgrad)))
-    any_inf_value = any(any.((x->isinf.(x)).(natgrad)))
-    if any_nan_value || any_inf_value
-        # Gradients are non-numeric
-        if opt.state == 1 # Return to previous parameters which give numeric g̃
-            params = deepcopy(opt.stable_params)
-        end
-        return # no update
-    else
-        # Gradients are numeric
-        if opt.state ==1
-            opt.stable_params = deepcopy(params)
-        end
-    end
-
-    params[1] += opt.eta*natgrad[1]
-    params[2] += opt.eta*natgrad[2]+0.5*(opt.eta)^2*natgrad[2]*s_inv*natgrad[2]
-
-    if isProper(bcToStandardDist(prior,[params[1];vec(params[2])])) == false
-        # not proper after update
-        if opt.state == 1
-            params = deepcopy(opt.stable_params)
-        end
-    end
-end
-# update method for iBLR, Multivariate Gaussian case
-function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Multivariate, F}) where F <: Gaussian
-    s_inv = deepcopy(cholinv(params[2]))
-    update!(opt,params,natgrad,prior,s_inv)
-end
-
-
 # CVI Original for Univariate Gaussian
 function renderCVI(logp_nc::Function,
                    num_iterations::Int,
@@ -1116,368 +1020,7 @@ function renderCVI(logp_nc::Function,
     end
     return λ
 end
-# iBLR Original for Univariate Gaussian
-function renderCVI(logp_nc::Function,
-                   num_iterations::Int,
-                   opt::iBLR,
-                   λ_init::Vector,
-                   msg_in::Message{<:Gaussian, Univariate})
 
-    """
-    improved Bayesian Learning Rule implementation for CVI node
-        BC Parameters are mean and precision(=[μ,S]) for Gaussian
-    """
-
-    df_m(z) = ForwardDiff.derivative(logp_nc,z)
-    df_H(z) = ForwardDiff.derivative(df_m,z)
-
-    η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
-    λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
-    λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
-    λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
-    opt.stable_params = deepcopy(λ_iblr) # initialize stable point
-    for i=1:num_iterations
-        q = bcToStandardDist(msg_in.dist,λ_iblr)
-        z_s = sample(q)
-        g_i = df_m(z_s)
-        H_i=  df_H(z_s)
-        g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
-        g_μ_2= -H_i+η[2]-λ_iblr[2]
-        g̃=[g_μ_1;g_μ_2]
-        update!(opt,λ_iblr,g̃,msg_in.dist)
-    end
-    λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
-    return λ_natural_posterior
-end
-# iBLR with ADAGrad
-function renderCVI(logp_nc::Function,
-                   num_iterations::Int,
-                   opt::iBLR_AdaGrad,
-                   λ_init::Vector,
-                   msg_in::Message{<:Gaussian, Univariate})
-
-    """
-    improved Bayesian Learning Rule implementation for CVI node
-        BC Parameters are mean and precision(=[μ,S]) for Gaussian
-    """
-
-    df_m(z) = ForwardDiff.derivative(logp_nc,z)
-    df_H(z) = ForwardDiff.derivative(df_m,z)
-
-    η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
-    λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
-    λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
-    λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
-    opt.stable_params = deepcopy(λ_iblr) # initialize stable point
-    for i=1:num_iterations
-        q = bcToStandardDist(msg_in.dist,λ_iblr)
-        z_s = sample(q)
-        g_i = df_m(z_s)
-        H_i=  df_H(z_s)
-        g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
-        g_μ_2= -H_i+η[2]-λ_iblr[2]
-        g̃=[g_μ_1;g_μ_2]
-        opt.grad_acc = deepcopy(i)
-        update!(opt,λ_iblr,g̃,msg_in.dist)
-    end
-    λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
-    return λ_natural_posterior
-end
-# iBLR with Early Stopping Criteria based on Free Energy
-function renderCVI_Δ_FE(logp_nc::Function,
-                   num_iterations::Int,
-                   opt::iBLR,
-                   λ_init::Vector,
-                   msg_in::Message{<:Gaussian, Univariate},
-                   tolerance::Float64)
-   """
-   improved Bayesian Learning Rule implementation for CVI node
-       BC Parameters are mean and precision(=[μ,S]) for Gaussian
-       with early stopping criterion based on mean/median of relative difference of Free Energy
-       similar to STAN's algorithm
-   """
-    df_m(z) = ForwardDiff.derivative(logp_nc,z)
-    df_H(z) = ForwardDiff.derivative(df_m,z)
-
-    # iBLR Initialization
-    η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
-    λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
-    λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
-    λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
-    opt.stable_params = deepcopy(λ_iblr) # initialize stable point
-
-    # Δ_FE Initialization
-    stats = FE_stats() #initialize ΔElbo object
-    eval_elbo_window = 10
-    burn_in_min = 9
-    burn_in_max = floor(num_iterations/10)
-    FE_check = false
-    is_FE_converged = false
-    λ_iblr_best = deepcopy(λ_iblr)
-    F = Dict{Int64,Float64}()
-
-    println("---Δ_FE Parameters---")
-    println("Evaluate FE every $eval_elbo_window'th iteration")
-    println("Tolerance (%):$tolerance")
-    println("Burn_in_min:$burn_in_min ,Burn_in_max:$burn_in_max")
-    println("-------")
-    # ---
-    for i=1:num_iterations
-        q = bcToStandardDist(msg_in.dist,λ_iblr)
-        z_s = sample(q)
-        # ForwardDiff.hessian!(result, logp_nc, [z_s]);
-        # g_i = DiffResults.gradient(result)
-        # H_i = DiffResults.hessian(result)
-        g_i = df_m(z_s)
-        H_i=  df_H(z_s)
-        g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
-        g_μ_2= -H_i+η[2]-λ_iblr[2]
-        g̃=[g_μ_1;g_μ_2]
-        update!(opt,λ_iblr,g̃,msg_in.dist)
-
-        # ---- START Δ_FE Algo
-        #TODO : Note that FE is calculated after First update, it can be calculated
-        # with prior params (but then KL part becomes 0)
-        if i ==1
-            F_first = KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
-            stats.F_best = F_first
-            stats.F_prev = deepcopy(stats.F_best)
-            stats.F_best_idx = 1
-            push!(F,1=>F_first)
-        end
-        # If iteration # is smaller then burn_in_min, dont calculate FE
-        if i <= burn_in_min
-            nothing
-        # First,Calc FE every eval_elbo_window'th step
-        elseif mod(i,eval_elbo_window) == 0
-            FE = KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
-            push!(F,i=>FE)
-            #First condition to start tests: FE is smaller than initial FE
-            if FE_check == false && FE < stats.F_best
-                FE_check = true # FE dropped below initial ELBO
-                println("FE_check starts when i=$i")
-            #Second condition to start tests: i exceeds burn_in_max period
-            elseif FE_check == false && i > burn_in_max
-                FE_check = true
-                println("FE_check starts when i=$i")
-            end
-            # If tests start, check convergence
-            if FE_check
-                is_FE_converged = ΔFE_check!(stats,FE,i,tolerance)
-                # Store λ yielding minimum Free Energy
-                if stats.F_best_idx == i
-                    λ_iblr_best = deepcopy(λ_iblr)
-                end
-            end
-            # If converged, stop iterations
-            if is_FE_converged
-                println("Algorithm converged at iteration $i")
-                break
-            end
-        end
-        # ---- End Δ_FE ALGO
-    end # End for loop
-    if is_FE_converged
-        # return best iterate
-        #λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr_best)
-        #return last iterate
-        λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
-    else
-        #return last iterate
-        λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
-    end
-    return λ_natural_posterior,stats
-end
-# iBLR with Rhat diagnostic for convergence
-function oneWindowSimulation_MCMC(J::F,Window::F,opts::ADAM,λ_initials::Vector,logp_nc::Function,is_first_sim :: Bool,msg_in::Message{<:Gaussian, Univariate}) where F<:Number
-    # Chain Initialization
-    if is_first_sim
-        # First sim -> initial point is the same for all chains
-        params_container = [[λ_initials] for j=1:J]
-        opt_matrix =[deepcopy(opts) for j =1:J]
-    else
-        # Not first -> chains are at different points
-        params_container = [[λ_initials[j]] for j=1:J]
-        opt_matrix =deepcopy(opts)
-    end
-    # Run one simulation window for all chains
-    # Start simulation --- This part is specific for each msg_in
-    g̃_func = calcNatGradBC_func(logp_nc,msg_in.dist)
-    for n =1:Window
-        for j=1:J
-            # push λ_t as λ_t+1 so that it will get updated in-place
-            # θ_matrix[j,end] is the last λ_iblr for chain j
-            push!(params_container[j],deepcopy(params_container[j][end]))
-            z_s = sampleBCDist(msg_in.dist,params_container[j][end])
-            g̃ = g̃_func(z_s,params_container[j][end])
-            # This updates λ_t+1 from λ_t
-            update!(opt_matrix[j],params_container[j][end],g̃,msg_in.dist)
-        end
-    end
-    last_params = [params_container[j][end] for j=1:J]
-    # --- End of Simulation
-    # Calculate Where to split the chain
-    total_len =Window+1
-    k =  mod(Window,4) # how many extra samples to include in burn_in
-    burn_in = Int64((Window-k)/2)+1+k  # Half of a chain
-    half_chain_end = 3*Int64((Window-k)/4)+1+k # Mid of last half
-    n = half_chain_end - burn_in + 1 #Samples per split-chain
-    # Split chains in half
-    split_chains = [params_container[j][start_idx:end_idx] for j=1:J for (start_idx,end_idx) in zip((burn_in+1,half_chain_end+1),(half_chain_end,total_len))]
-    # Calculate mean/variance of all split chains
-    chain_means = [mean(chain) for chain in split_chains]
-    chain_vars = [var(chain) for chain in split_chains]
-    #TODO: For Generic Functon, get idx-of-interest first, then just calculate stats for that variable/variables
-    idx_of_interest = getStatisticsIndexMC(msg_in.dist)
-    # Calculate necessary statistics for Rhat,ESS and MCSE
-    W = mean(chain_vars) # mean of within chain variances
-    B_n = var(chain_means) # B/n : variance of means of chains
-    σ_2_plus = ((n-1)/n)*W+B_n
-    rhat = sqrt.(σ_2_plus./W) # Calculate Rhat
-    println("W=$W,B_n=$B_n,n=$n,σ_2_plus=$σ_2_plus,R=$rhat")
-    #TODO: RENAME BELOW VARIABLES
-    meanparam_ρ_tj= [autocor([λ[idx_of_interest] for λ in split_chains[j]]) for j=1:2*J];#ρ_tj
-    meanparam_var_j=[chain_vars[j][idx_of_interest] for j=1:length(chain_vars)] #sj^2
-    weighted_corr = mean(meanparam_var_j.*meanparam_ρ_tj,dims=1)[idx_of_interest]
-    ρ_t = 1.0 .- (W[idx_of_interest] .- weighted_corr)./(σ_2_plus[idx_of_interest])
-    # Calculate ESS
-    ess = (2*J)*n/(1+2*sum(ρ_t))
-    # Calculate Monte Carlo Standard Error (MCSE)
-    mcse = sqrt(σ_2_plus[idx_of_interest]/ess)
-    # Calculate Iterate Average
-    # Note: Mean of means of chains is only true since chains have same sample size
-    λ_bar = mean(chain_means)
-    stats_dict=Dict(:rhat=>rhat,:ess=>ess,:mcse=>mcse,:λ_bar=>λ_bar)
-    k_vect = Vector{Float64}(undef,2*J)
-    #
-    S=1000
-    μ_all = [[split_chains[j][n][1] for n=1:250] for j=1:2*J]
-    μ_chains = [mean(μ_all[j]) for j=1:2*J]
-    λ_mean_chains = [mean(x) for x in split_chains]
-    for j=1:2*J
-        k_vect[j] = Pareto_k_fit(logp_nc,msg_in,λ_mean_chains[j],S)
-    end
-    #
-    return last_params,opt_matrix,stats_dict,split_chains,k_vect
-end
-
-function renderCVI_Rhat(logp_nc::Function,
-                   num_iterations::Int,
-                   opt::Union{iBLR,ParamStr2},
-                   λ_init::Vector,
-                   msg_in::Message{<:Gaussian, Univariate},
-                   num_simulations,tau,J,Window)
-
-    """
-    improved Bayesian Learning Rule implementation for CVI node
-        BC Parameters are mean and precision(=[μ,S]) for Gaussian
-    """
-
-    df_m(z) = ForwardDiff.derivative(logp_nc,z)
-    df_H(z) = ForwardDiff.derivative(df_m,z)
-
-    η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
-    λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
-    λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
-    λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
-    opt.stable_params = deepcopy(λ_iblr) # initialize stable point
-    # Rhat Diagnostic Params
-    # J = 25
-    # Window = 1000 #also n
-    last_params,opt_matrix,stats_dict,all_params,k_vect=oneWindowSimulation_MCMC(J,Window,opt,λ_iblr,logp_nc,true,msg_in)
-    println("i=0,Last_params = $(last_params[1]),Rhat=$(stats_dict[:rhat])")
-    for i = 1:num_simulations
-        last_params,opt_matrix,stats_dict,all_params,k_vect=oneWindowSimulation_MCMC(J,Window,opt_matrix,η,last_params,logp_nc,false,msg_in)
-        println("i=$i,Last_params = $(last_params[1]),Rhat=$(stats_dict[:rhat])")
-        if all(stats_dict[:rhat] .< tau)
-            break
-        end
-    end
-    #TODO: DO the below iteration when Rhat converges or WARN THE USER that VI might not be converged
-    # After stationary point has been found / Max number of simulations
-    for i=1:num_simulations
-        last_params,opt_matrix,stats_dict,all_params,k_vect=oneWindowSimulation_MCMC(J,Window,opt_matrix,η,last_params,logp_nc,false,msg_in)
-        # Check MCSE and ESS
-        if all(stats_dict[:mcse] .< 0.1) && all(stats_dict[:ess] .> 15.0)
-            println("Converged Parameters using Iterate Averaging = $(stats_dict[:λ_bar])")
-            break
-        end
-    end
-    #TODO: Return Natural Params in Normal Implementation
-    return last_params,stats_dict,all_params,k_vect
-
-end
-
-# iBLR with Pareto shape parameter fit return
-function renderCVI_Pareto(logp_nc::Function,
-                   num_iterations::Int,
-                   opt::iBLR,
-                   λ_init::Vector,
-                   msg_in::Message{<:Gaussian, Univariate},
-                   S::F) where F<:Number
-
-    """
-    improved Bayesian Learning Rule implementation for CVI node
-        BC Parameters are mean and precision(=[μ,S]) for Gaussian
-    """
-
-    df_m(z) = ForwardDiff.derivative(logp_nc,z)
-    df_H(z) = ForwardDiff.derivative(df_m,z)
-
-    η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
-    λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
-    λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
-    λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
-    opt.stable_params = deepcopy(λ_iblr) # initialize stable point
-    for i=1:num_iterations
-        q = bcToStandardDist(msg_in.dist,λ_iblr)
-        z_s = sample(q)
-        g_i = df_m(z_s)
-        H_i=  df_H(z_s)
-        g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
-        g_μ_2= -H_i+η[2]-λ_iblr[2]
-        g̃=[g_μ_1;g_μ_2]
-        update!(opt,λ_iblr,g̃,msg_in.dist)
-    end
-
-    λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
-    k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_iblr,S)
-    return k̂_new
-end
-# iBLR original for Multivariate Gaussian OLD - NOT WORKING
-function renderCVI(logp_nc::Function,
-                   num_iterations::Int,
-                   opt::iBLR,
-                   λ_init::Vector,
-                   msg_in::Message{<:Gaussian, Multivariate})
-
-    df_m(z) = ForwardDiff.gradient(logp_nc,z)
-    df_H(z) = ForwardDiff.jacobian(df_m,z)
-
-    # λ_init are Natural Parameters for MV Gaussian
-    #params = [vec(μ),mat(S)]
-    n = dims(msg_in.dist)
-    m_prior = deepcopy(unsafeMean(msg_in.dist))
-    S_prior = deepcopy(unsafePrecision(msg_in.dist))
-    S_t = deepcopy(reshape(-2*λ_init[n+1:end],n,n))
-    m_t = deepcopy(S_t*λ_init[1:n])
-    params = [m_t,S_t]
-    opt.stable_params= deepcopy(params)
-    for i=1:num_iterations
-        q = bcToStandardDist(msg_in.dist,params)
-        z_s = sample(q)
-        g_i = df_m(z_s)
-        H_i = df_H(z_s)
-        # Compute natural gradients of BCN parametrization
-        s_inv = deepcopy(cholinv(params[2]))
-        g_μ_1 = s_inv*(g_i+S_prior*(m_prior-params[1]))
-        g_μ_2= -H_i+S_prior-params[2]
-        g̃=[g_μ_1,g_μ_2]
-        update!(opt,params,g̃,msg_in.dist,s_inv)
-    end
-    λ_natural_posterior = [params[2]*params[1];vec(-0.5*params[2])]
-    return λ_natural_posterior
-end
 # CVI original for Multivariate Gaussian
 function renderCVI(logp_nc::Function,
                    num_iterations::Int,
@@ -1658,3 +1201,466 @@ function collectSumProductNodeInbounds(node::CVI, entry::ScheduleEntry)
 
     return inbounds
 end
+
+
+
+# Old implementations
+# # Additional definitions for iBLR implementation of CVI
+# mutable struct iBLR
+#     eta::Float64
+#     state::Int64
+#     stable_params::Any
+# end
+# mutable struct iBLR_AdaGrad
+#     field::Any
+# end
+# iBLR(eta)=iBLR(eta,1,nothing)
+
+# # update method for iBLR, Univariate Gaussian case
+# function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
+#     #params = [μ,S]
+#     if any(isnan.(natgrad)) || any(isinf.(natgrad))
+#         # Gradients are non-numeric
+#         if opt.state == 1 # Return to previous parameters which give numeric g̃
+#             params = deepcopy(opt.stable_params)
+#         end
+#         return # no update
+#     else
+#         # Gradients are numeric
+#         if opt.state ==1
+#             opt.stable_params = deepcopy(params)
+#         end
+#     end
+#     params[1] += opt.eta*natgrad[1]
+#     params[2] += opt.eta*natgrad[2]+0.5*(opt.eta*natgrad[2])^2/params[2]
+#
+#     if isProper(bcToStandardDist(prior,params)) == false
+#         # not proper after update
+#         if opt.state == 1
+#             params = deepcopy(opt.stable_params)
+#         end
+#     end
+#     return params
+# end
+# # update method for iBLR_AdaGrad, Univariate Gaussian case
+# function update!(opt::iBLR_AdaGrad,params,natgrad,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
+#     #params = [μ,S]
+#     if any(isnan.(natgrad)) || any(isinf.(natgrad))
+#         # Gradients are non-numeric
+#         if opt.state == 1 # Return to previous parameters which give numeric g̃
+#             params = deepcopy(opt.stable_params)
+#         end
+#         return # no update
+#     else
+#         # Gradients are numeric
+#         if opt.state ==1
+#             opt.stable_params = deepcopy(params)
+#         end
+#     end
+#
+#     denominator = 1+(opt.grad_acc-1)^(0.5)
+#     #denominator = (1.01)^(opt.grad_acc)
+#     #opt.eta = opt.eta*0.95
+#     params[1] += (opt.eta/denominator)*natgrad[1]
+#     params[2] += (opt.eta/denominator)*natgrad[2]+0.5*((opt.eta/denominator)*natgrad[2])^2/params[2]
+#     #println("Current β_t = $(opt.eta/denominator)")
+#
+#     if isProper(bcToStandardDist(prior,params)) == false
+#         # not proper after update
+#         if opt.state == 1
+#             params = deepcopy(opt.stable_params)
+#         end
+#     end
+# end
+# # update method for iBLR, Multivariate Gaussian case
+# function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Multivariate, F},s_inv::Array{Float64,2}) where F <: Gaussian
+#     #params = [vec(μ),mat(S)]
+#     any_nan_value = any(any.((x->isnan.(x)).(natgrad)))
+#     any_inf_value = any(any.((x->isinf.(x)).(natgrad)))
+#     if any_nan_value || any_inf_value
+#         # Gradients are non-numeric
+#         if opt.state == 1 # Return to previous parameters which give numeric g̃
+#             params = deepcopy(opt.stable_params)
+#         end
+#         return # no update
+#     else
+#         # Gradients are numeric
+#         if opt.state ==1
+#             opt.stable_params = deepcopy(params)
+#         end
+#     end
+#
+#     params[1] += opt.eta*natgrad[1]
+#     params[2] += opt.eta*natgrad[2]+0.5*(opt.eta)^2*natgrad[2]*s_inv*natgrad[2]
+#
+#     if isProper(bcToStandardDist(prior,[params[1];vec(params[2])])) == false
+#         # not proper after update
+#         if opt.state == 1
+#             params = deepcopy(opt.stable_params)
+#         end
+#     end
+# end
+# # update method for iBLR, Multivariate Gaussian case
+# function update!(opt::iBLR,params,natgrad,prior::ProbabilityDistribution{Multivariate, F}) where F <: Gaussian
+#     s_inv = deepcopy(cholinv(params[2]))
+#     update!(opt,params,natgrad,prior,s_inv)
+# end
+# # iBLR Original for Univariate Gaussian
+# function renderCVI(logp_nc::Function,
+#                    num_iterations::Int,
+#                    opt::iBLR,
+#                    λ_init::Vector,
+#                    msg_in::Message{<:Gaussian, Univariate})
+#
+#     """
+#     improved Bayesian Learning Rule implementation for CVI node
+#         BC Parameters are mean and precision(=[μ,S]) for Gaussian
+#     """
+#
+#     df_m(z) = ForwardDiff.derivative(logp_nc,z)
+#     df_H(z) = ForwardDiff.derivative(df_m,z)
+#
+#     η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
+#     λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
+#     λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
+#     λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+#     opt.stable_params = deepcopy(λ_iblr) # initialize stable point
+#     for i=1:num_iterations
+#         q = bcToStandardDist(msg_in.dist,λ_iblr)
+#         z_s = sample(q)
+#         g_i = df_m(z_s)
+#         H_i=  df_H(z_s)
+#         g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
+#         g_μ_2= -H_i+η[2]-λ_iblr[2]
+#         g̃=[g_μ_1;g_μ_2]
+#         update!(opt,λ_iblr,g̃,msg_in.dist)
+#     end
+#     λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
+#     return λ_natural_posterior
+# end
+# # iBLR with ADAGrad
+# function renderCVI(logp_nc::Function,
+#                    num_iterations::Int,
+#                    opt::iBLR_AdaGrad,
+#                    λ_init::Vector,
+#                    msg_in::Message{<:Gaussian, Univariate})
+#
+#     """
+#     improved Bayesian Learning Rule implementation for CVI node
+#         BC Parameters are mean and precision(=[μ,S]) for Gaussian
+#     """
+#
+#     df_m(z) = ForwardDiff.derivative(logp_nc,z)
+#     df_H(z) = ForwardDiff.derivative(df_m,z)
+#
+#     η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
+#     λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
+#     λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
+#     λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+#     opt.stable_params = deepcopy(λ_iblr) # initialize stable point
+#     for i=1:num_iterations
+#         q = bcToStandardDist(msg_in.dist,λ_iblr)
+#         z_s = sample(q)
+#         g_i = df_m(z_s)
+#         H_i=  df_H(z_s)
+#         g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
+#         g_μ_2= -H_i+η[2]-λ_iblr[2]
+#         g̃=[g_μ_1;g_μ_2]
+#         opt.grad_acc = deepcopy(i)
+#         update!(opt,λ_iblr,g̃,msg_in.dist)
+#     end
+#     λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
+#     return λ_natural_posterior
+# end
+# # iBLR with Early Stopping Criteria based on Free Energy
+# function renderCVI_Δ_FE(logp_nc::Function,
+#                    num_iterations::Int,
+#                    opt::iBLR,
+#                    λ_init::Vector,
+#                    msg_in::Message{<:Gaussian, Univariate},
+#                    tolerance::Float64)
+#    """
+#    improved Bayesian Learning Rule implementation for CVI node
+#        BC Parameters are mean and precision(=[μ,S]) for Gaussian
+#        with early stopping criterion based on mean/median of relative difference of Free Energy
+#        similar to STAN's algorithm
+#    """
+#     df_m(z) = ForwardDiff.derivative(logp_nc,z)
+#     df_H(z) = ForwardDiff.derivative(df_m,z)
+#
+#     # iBLR Initialization
+#     η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
+#     λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
+#     λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
+#     λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+#     opt.stable_params = deepcopy(λ_iblr) # initialize stable point
+#
+#     # Δ_FE Initialization
+#     stats = FE_stats() #initialize ΔElbo object
+#     eval_elbo_window = 10
+#     burn_in_min = 9
+#     burn_in_max = floor(num_iterations/10)
+#     FE_check = false
+#     is_FE_converged = false
+#     λ_iblr_best = deepcopy(λ_iblr)
+#     F = Dict{Int64,Float64}()
+#
+#     println("---Δ_FE Parameters---")
+#     println("Evaluate FE every $eval_elbo_window'th iteration")
+#     println("Tolerance (%):$tolerance")
+#     println("Burn_in_min:$burn_in_min ,Burn_in_max:$burn_in_max")
+#     println("-------")
+#     # ---
+#     for i=1:num_iterations
+#         q = bcToStandardDist(msg_in.dist,λ_iblr)
+#         z_s = sample(q)
+#         # ForwardDiff.hessian!(result, logp_nc, [z_s]);
+#         # g_i = DiffResults.gradient(result)
+#         # H_i = DiffResults.hessian(result)
+#         g_i = df_m(z_s)
+#         H_i=  df_H(z_s)
+#         g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
+#         g_μ_2= -H_i+η[2]-λ_iblr[2]
+#         g̃=[g_μ_1;g_μ_2]
+#         update!(opt,λ_iblr,g̃,msg_in.dist)
+#
+#         # ---- START Δ_FE Algo
+#         #TODO : Note that FE is calculated after First update, it can be calculated
+#         # with prior params (but then KL part becomes 0)
+#         if i ==1
+#             F_first = KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
+#             stats.F_best = F_first
+#             stats.F_prev = deepcopy(stats.F_best)
+#             stats.F_best_idx = 1
+#             push!(F,1=>F_first)
+#         end
+#         # If iteration # is smaller then burn_in_min, dont calculate FE
+#         if i <= burn_in_min
+#             nothing
+#         # First,Calc FE every eval_elbo_window'th step
+#         elseif mod(i,eval_elbo_window) == 0
+#             FE = KL_bc(λ_iblr,η,msg_in.dist) - logp_nc(z_s)
+#             push!(F,i=>FE)
+#             #First condition to start tests: FE is smaller than initial FE
+#             if FE_check == false && FE < stats.F_best
+#                 FE_check = true # FE dropped below initial ELBO
+#                 println("FE_check starts when i=$i")
+#             #Second condition to start tests: i exceeds burn_in_max period
+#             elseif FE_check == false && i > burn_in_max
+#                 FE_check = true
+#                 println("FE_check starts when i=$i")
+#             end
+#             # If tests start, check convergence
+#             if FE_check
+#                 is_FE_converged = ΔFE_check!(stats,FE,i,tolerance)
+#                 # Store λ yielding minimum Free Energy
+#                 if stats.F_best_idx == i
+#                     λ_iblr_best = deepcopy(λ_iblr)
+#                 end
+#             end
+#             # If converged, stop iterations
+#             if is_FE_converged
+#                 println("Algorithm converged at iteration $i")
+#                 break
+#             end
+#         end
+#         # ---- End Δ_FE ALGO
+#     end # End for loop
+#     if is_FE_converged
+#         # return best iterate
+#         #λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr_best)
+#         #return last iterate
+#         λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
+#     else
+#         #return last iterate
+#         λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
+#     end
+#     return λ_natural_posterior,stats
+# end
+# # iBLR with Rhat diagnostic for convergence
+# function oneWindowSimulation_MCMC(J::F,Window::F,opts::ADAM,λ_initials::Vector,logp_nc::Function,is_first_sim :: Bool,msg_in::Message{<:Gaussian, Univariate}) where F<:Number
+#     # Chain Initialization
+#     if is_first_sim
+#         # First sim -> initial point is the same for all chains
+#         params_container = [[λ_initials] for j=1:J]
+#         opt_matrix =[deepcopy(opts) for j =1:J]
+#     else
+#         # Not first -> chains are at different points
+#         params_container = [[λ_initials[j]] for j=1:J]
+#         opt_matrix =deepcopy(opts)
+#     end
+#     # Run one simulation window for all chains
+#     # Start simulation --- This part is specific for each msg_in
+#     g̃_func = calcNatGradBC_func(logp_nc,msg_in.dist)
+#     for n =1:Window
+#         for j=1:J
+#             # push λ_t as λ_t+1 so that it will get updated in-place
+#             # θ_matrix[j,end] is the last λ_iblr for chain j
+#             push!(params_container[j],deepcopy(params_container[j][end]))
+#             z_s = sampleBCDist(msg_in.dist,params_container[j][end])
+#             g̃ = g̃_func(z_s,params_container[j][end])
+#             # This updates λ_t+1 from λ_t
+#             update!(opt_matrix[j],params_container[j][end],g̃,msg_in.dist)
+#         end
+#     end
+#     last_params = [params_container[j][end] for j=1:J]
+#     # --- End of Simulation
+#     # Calculate Where to split the chain
+#     total_len =Window+1
+#     k =  mod(Window,4) # how many extra samples to include in burn_in
+#     burn_in = Int64((Window-k)/2)+1+k  # Half of a chain
+#     half_chain_end = 3*Int64((Window-k)/4)+1+k # Mid of last half
+#     n = half_chain_end - burn_in + 1 #Samples per split-chain
+#     # Split chains in half
+#     split_chains = [params_container[j][start_idx:end_idx] for j=1:J for (start_idx,end_idx) in zip((burn_in+1,half_chain_end+1),(half_chain_end,total_len))]
+#     # Calculate mean/variance of all split chains
+#     chain_means = [mean(chain) for chain in split_chains]
+#     chain_vars = [var(chain) for chain in split_chains]
+#     #TODO: For Generic Functon, get idx-of-interest first, then just calculate stats for that variable/variables
+#     idx_of_interest = getStatisticsIndexMC(msg_in.dist)
+#     # Calculate necessary statistics for Rhat,ESS and MCSE
+#     W = mean(chain_vars) # mean of within chain variances
+#     B_n = var(chain_means) # B/n : variance of means of chains
+#     σ_2_plus = ((n-1)/n)*W+B_n
+#     rhat = sqrt.(σ_2_plus./W) # Calculate Rhat
+#     println("W=$W,B_n=$B_n,n=$n,σ_2_plus=$σ_2_plus,R=$rhat")
+#     #TODO: RENAME BELOW VARIABLES
+#     meanparam_ρ_tj= [autocor([λ[idx_of_interest] for λ in split_chains[j]]) for j=1:2*J];#ρ_tj
+#     meanparam_var_j=[chain_vars[j][idx_of_interest] for j=1:length(chain_vars)] #sj^2
+#     weighted_corr = mean(meanparam_var_j.*meanparam_ρ_tj,dims=1)[idx_of_interest]
+#     ρ_t = 1.0 .- (W[idx_of_interest] .- weighted_corr)./(σ_2_plus[idx_of_interest])
+#     # Calculate ESS
+#     ess = (2*J)*n/(1+2*sum(ρ_t))
+#     # Calculate Monte Carlo Standard Error (MCSE)
+#     mcse = sqrt(σ_2_plus[idx_of_interest]/ess)
+#     # Calculate Iterate Average
+#     # Note: Mean of means of chains is only true since chains have same sample size
+#     λ_bar = mean(chain_means)
+#     stats_dict=Dict(:rhat=>rhat,:ess=>ess,:mcse=>mcse,:λ_bar=>λ_bar)
+#     k_vect = Vector{Float64}(undef,2*J)
+#     #
+#     S=1000
+#     μ_all = [[split_chains[j][n][1] for n=1:250] for j=1:2*J]
+#     μ_chains = [mean(μ_all[j]) for j=1:2*J]
+#     λ_mean_chains = [mean(x) for x in split_chains]
+#     for j=1:2*J
+#         k_vect[j] = Pareto_k_fit(logp_nc,msg_in,λ_mean_chains[j],S)
+#     end
+#     #
+#     return last_params,opt_matrix,stats_dict,split_chains,k_vect
+# end
+# function renderCVI_Rhat(logp_nc::Function,
+#                    num_iterations::Int,
+#                    opt::Union{iBLR,ParamStr2},
+#                    λ_init::Vector,
+#                    msg_in::Message{<:Gaussian, Univariate},
+#                    num_simulations,tau,J,Window)
+#
+#     """
+#     improved Bayesian Learning Rule implementation for CVI node
+#         BC Parameters are mean and precision(=[μ,S]) for Gaussian
+#     """
+#
+#     df_m(z) = ForwardDiff.derivative(logp_nc,z)
+#     df_H(z) = ForwardDiff.derivative(df_m,z)
+#
+#     η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
+#     λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
+#     λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
+#     λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+#     opt.stable_params = deepcopy(λ_iblr) # initialize stable point
+#     # Rhat Diagnostic Params
+#     # J = 25
+#     # Window = 1000 #also n
+#     last_params,opt_matrix,stats_dict,all_params,k_vect=oneWindowSimulation_MCMC(J,Window,opt,λ_iblr,logp_nc,true,msg_in)
+#     println("i=0,Last_params = $(last_params[1]),Rhat=$(stats_dict[:rhat])")
+#     for i = 1:num_simulations
+#         last_params,opt_matrix,stats_dict,all_params,k_vect=oneWindowSimulation_MCMC(J,Window,opt_matrix,η,last_params,logp_nc,false,msg_in)
+#         println("i=$i,Last_params = $(last_params[1]),Rhat=$(stats_dict[:rhat])")
+#         if all(stats_dict[:rhat] .< tau)
+#             break
+#         end
+#     end
+#     #TODO: DO the below iteration when Rhat converges or WARN THE USER that VI might not be converged
+#     # After stationary point has been found / Max number of simulations
+#     for i=1:num_simulations
+#         last_params,opt_matrix,stats_dict,all_params,k_vect=oneWindowSimulation_MCMC(J,Window,opt_matrix,η,last_params,logp_nc,false,msg_in)
+#         # Check MCSE and ESS
+#         if all(stats_dict[:mcse] .< 0.1) && all(stats_dict[:ess] .> 15.0)
+#             println("Converged Parameters using Iterate Averaging = $(stats_dict[:λ_bar])")
+#             break
+#         end
+#     end
+#     #TODO: Return Natural Params in Normal Implementation
+#     return last_params,stats_dict,all_params,k_vect
+# end
+# # iBLR with Pareto shape parameter fit return
+# function renderCVI_Pareto(logp_nc::Function,
+#                    num_iterations::Int,
+#                    opt::iBLR,
+#                    λ_init::Vector,
+#                    msg_in::Message{<:Gaussian, Univariate},
+#                    S::F) where F<:Number
+#
+#     """
+#     improved Bayesian Learning Rule implementation for CVI node
+#         BC Parameters are mean and precision(=[μ,S]) for Gaussian
+#     """
+#
+#     df_m(z) = ForwardDiff.derivative(logp_nc,z)
+#     df_H(z) = ForwardDiff.derivative(df_m,z)
+#
+#     η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
+#     λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
+#     λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
+#     λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+#     opt.stable_params = deepcopy(λ_iblr) # initialize stable point
+#     for i=1:num_iterations
+#         q = bcToStandardDist(msg_in.dist,λ_iblr)
+#         z_s = sample(q)
+#         g_i = df_m(z_s)
+#         H_i=  df_H(z_s)
+#         g_μ_1 = (g_i+η[2]*(η[1]-λ_iblr[1]))/λ_iblr[2]
+#         g_μ_2= -H_i+η[2]-λ_iblr[2]
+#         g̃=[g_μ_1;g_μ_2]
+#         update!(opt,λ_iblr,g̃,msg_in.dist)
+#     end
+#
+#     λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
+#     k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_iblr,S)
+#     return k̂_new
+# end
+# # iBLR original for Multivariate Gaussian OLD - NOT WORKING
+# function renderCVI(logp_nc::Function,
+#                    num_iterations::Int,
+#                    opt::iBLR,
+#                    λ_init::Vector,
+#                    msg_in::Message{<:Gaussian, Multivariate})
+#
+#     df_m(z) = ForwardDiff.gradient(logp_nc,z)
+#     df_H(z) = ForwardDiff.jacobian(df_m,z)
+#
+#     # λ_init are Natural Parameters for MV Gaussian
+#     #params = [vec(μ),mat(S)]
+#     n = dims(msg_in.dist)
+#     m_prior = deepcopy(unsafeMean(msg_in.dist))
+#     S_prior = deepcopy(unsafePrecision(msg_in.dist))
+#     S_t = deepcopy(reshape(-2*λ_init[n+1:end],n,n))
+#     m_t = deepcopy(S_t*λ_init[1:n])
+#     params = [m_t,S_t]
+#     opt.stable_params= deepcopy(params)
+#     for i=1:num_iterations
+#         q = bcToStandardDist(msg_in.dist,params)
+#         z_s = sample(q)
+#         g_i = df_m(z_s)
+#         H_i = df_H(z_s)
+#         # Compute natural gradients of BCN parametrization
+#         s_inv = deepcopy(cholinv(params[2]))
+#         g_μ_1 = s_inv*(g_i+S_prior*(m_prior-params[1]))
+#         g_μ_2= -H_i+S_prior-params[2]
+#         g̃=[g_μ_1,g_μ_2]
+#         update!(opt,params,g̃,msg_in.dist,s_inv)
+#     end
+#     λ_natural_posterior = [params[2]*params[1];vec(-0.5*params[2])]
+#     return λ_natural_posterior
+# end
