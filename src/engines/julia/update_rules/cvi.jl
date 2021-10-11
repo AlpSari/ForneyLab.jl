@@ -11,7 +11,8 @@ function ruleSPCVIIn1MV(node_id::Symbol,
     else
         λ_init = deepcopy(naturalParams(thenode.q[1]))
     end
-
+    println(msg_in)
+    println(msg_in.dist)
     logp_nc(z) = (thenode.dataset_size/thenode.batch_size)*logPdf(msg_out.dist, thenode.g(z))
     λ = renderCVI(logp_nc,thenode.num_iterations,thenode.opt,λ_init,msg_in)
 
@@ -381,9 +382,60 @@ function ParamStr2(;kwargs...)
         return ParamStr2(settings)
 end
 #--- renderCVI function
-function inexactLineSearch()
-    #TODO: Implement WolfeConditons for inexactLineSearch
-    return 1.0
+function inexactLineSearch(logp_nc::Function,
+                   opt::ParamStr2,
+                   λ_init::Vector,
+                   msg_in::Message{<:Gaussian, Univariate})
+
+    adaptStepSize_string = deepcopy(opt.stepsize_update)
+    opt.stepsize_update = "none"
+    stepsize_failsafe = 1e-5
+
+    η = bcParams(msg_in.dist)
+    λ_linesearch = deepcopy(naturalToBCParams(msg_in.dist,λ_init))
+    max_iterations = 100
+    opt.current_stepsize =0.999
+    g̃_func = calcNatGradBC_func(logp_nc,msg_in.dist)
+
+    is_found  = false
+
+    zs_array  = sampleBCDist(msg_in.dist,λ_linesearch,100)
+    FE_prev = KL_bc(λ_linesearch,η,msg_in.dist) - mean(logp_nc.(zs_array))
+    λ_linesearch_new = deepcopy(λ_linesearch)
+
+    for i=1:max_iterations
+
+        λ_linesearch_new = deepcopy(λ_linesearch)
+        g̃ = mean([g̃_func(z,λ_linesearch) for z in zs_array])
+        update!(opt,λ_linesearch_new,g̃,msg_in.dist)
+        zs_array_new = sampleBCDist(msg_in.dist,λ_linesearch_new,100)
+        FE_now = KL_bc(λ_linesearch_new,η,msg_in.dist) - mean(logp_nc.(zs_array_new))
+        if FE_now < FE_prev
+            is_found = true
+            opt.eta = opt.current_stepsize
+            opt.iteration_counter = 0
+            break
+        else
+            opt.current_stepsize = opt.current_stepsize * 0.15
+            λ_linesearch = λ_linesearch_new
+            zs_array = zs_array_new
+            FE_prev = FE_now
+        end
+    end
+
+    if is_found == false
+        if opt.verbose
+            println("inexactLineSearch failed, setting initial stepsize to $(stepsize_failsafe)")
+        end
+        opt.eta = stepsize_failsafe
+        opt.iteration_counter = 0
+    else
+        if opt.verbose
+            println("inexactLineSearch succeeded, setting initial stepsize to $(opt.eta)")
+        end
+    end
+    opt.stepsize_update = adaptStepSize_string
+    return opt.eta
 end
 function adaptStepSize(opt::ParamStr2)
     str = opt.stepsize_update
@@ -457,35 +509,37 @@ function oneWindowSimulation_MCMC(J::F,Window::F,opts::ADAM,λ_initials::Vector,
     burn_in = Int64((Window-k)/2)+1+k  # Half of a chain
     half_chain_end = 3*Int64((Window-k)/4)+1+k # Mid of last half
     n = half_chain_end - burn_in  #Samples per split-chain
-    #TODO :: FIX N =251 where it should be 250 when Window =1000
     # Split chains in half
     split_chains = [params_container[j][start_idx:end_idx] for j=1:J for (start_idx,end_idx) in zip((burn_in+1,half_chain_end+1),(half_chain_end,total_len))]
-    # Calculate mean/variance of all split chains
-    chain_means = [mean(chain) for chain in split_chains]
-    println(length(split_chains[1])) #TODO: FIX HERE FOR MV GAUSSIAN
-    chain_vars = [var(chain) for chain in split_chains]
-    #TODO: For Generic Functon, get idx-of-interest first, then just calculate stats for that variable/variables
-    idx_of_interest = getStatisticsIndexMC(msg_in.dist)
+    param_means = [mean(chain) for chain in split_chains]
+    #STATISTICS CALCULATION
+    idx_interest, range_interest = getStatisticsIndexMC(msg_in.dist)
+    interest_split_chains = [[x[idx_interest] for x in chain] for chain in split_chains]
+    chain_means = [mean(x) for x in interest_split_chains]
+    chain_vars = [var(x) for x in interest_split_chains]
     # Calculate necessary statistics for Rhat,ESS and MCSE
     W = mean(chain_vars) # mean of within chain variances
     B_n = var(chain_means) # B/n : variance of means of chains
     σ_2_plus = ((n-1)/n)*W+B_n
     rhat = sqrt.(σ_2_plus./W) # Calculate Rhat
-    #println("W=$W,B_n=$B_n,n=$n,σ_2_plus=$σ_2_plus,R=$rhat")
-    #TODO: RENAME BELOW VARIABLES
-    meanparam_ρ_tj= [autocor([λ[idx_of_interest] for λ in split_chains[j]]) for j=1:2*J];#ρ_tj
-    meanparam_var_j=[chain_vars[j][idx_of_interest] for j=1:length(chain_vars)] #sj^2
-    weighted_corr = mean(meanparam_var_j.*meanparam_ρ_tj,dims=1)[idx_of_interest]
-    ρ_t = 1.0 .- (W[idx_of_interest] .- weighted_corr)./(σ_2_plus[idx_of_interest])
-    # Calculate ESS
-    ess = (2*J)*n/(1+2*sum(ρ_t))
+
+    # CALCULATE ESS
+    ess_vect = []
+    for idx in range_interest
+        meanparam_ρ_tj= [autocor([λ[idx_interest][idx] for λ in split_chains[j]]) for j=1:2*J];#ρ_tj
+        meanparam_var_j=[chain_vars[j][idx] for j=1:2*J] #sj^2
+        weighted_corr = mean(meanparam_var_j.*meanparam_ρ_tj,dims=1)[1]
+        ρ_t = 1.0 .- (W[idx] .- weighted_corr)./(σ_2_plus[idx])
+        ess = (2*J)*n/(1+2*sum(ρ_t))
+        push!(ess_vect,ess)
+    end
     # Calculate Monte Carlo Standard Error (MCSE)
-    mcse = sqrt(σ_2_plus[idx_of_interest]/ess)
+    mcse = sqrt.(σ_2_plus[idx_interest]./ess_vect)
     # Calculate Iterate Average
     # Note: Mean of means of chains is only true since chains have same sample size
-    λ_bar = mean(chain_means)
-    stats_dict=Dict(:rhat=>rhat,:ess=>ess,:mcse=>mcse,:λ_bar=>λ_bar)
-        return last_params,opt_matrix,stats_dict
+    λ_bar = mean(param_means)
+    stats_dict=Dict(:rhat=>rhat,:ess=>ess_vect,:mcse=>mcse,:λ_bar=>λ_bar)
+    return last_params,opt_matrix,stats_dict
 end
 function oneWindowSimulation_MCMC(J::F,Window::F,opts,λ_initials::Vector,logp_nc::Function,is_first_sim::Bool,msg_in::Message{<:FactorNode, <:VariateType}) where F<:Number
     # Chain Initialization
@@ -600,7 +654,7 @@ function renderCVI(logp_nc::Function,
     if !(opt.is_initialized)
         # Check if auto stepsize detection is requested
         if opt.auto_init_stepsize
-            opt.eta = inexactLineSearch()
+            opt.eta = inexactLineSearch(logp_nc,opt,λ_init,msg_in) #TODO: MAKE THIS RETURN DEFAULT VALUE FOR GENERIC Distribution
             opt.current_stepsize = deepcopy(opt.eta)
             opt.iteration_counter = 0
         else
@@ -805,7 +859,7 @@ function renderCVI_Basic(logp_nc::Function,
     opt.stable_params = deepcopy(λ_iblr) # initialize stable point
     for i=1:convergence_optimizer.max_iterations
         z_s = sampleBCDist(msg_in.dist,λ_iblr)
-        if i ==0 #make this 1 to implement first update as CVI
+        if i ==0 #make this 1 to implement first update as CVI for Multivariate Gaussian
             df_m(z) = ForwardDiff.gradient(logp_nc,z)
             df_H(z) = ForwardDiff.jacobian(df_m,z)
             m_prior = deepcopy(unsafeMean(msg_in.dist))
@@ -822,6 +876,52 @@ function renderCVI_Basic(logp_nc::Function,
     end
     λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
     return λ_natural_posterior
+end
+
+function renderCVI_Rhat(logp_nc::Function,
+                   num_iterations::Int,
+                   opt::ParamStr2,
+                   λ_init::Vector,
+                   msg_in::Message{<:Gaussian, Univariate},
+                   num_simulations,tau,J,Window)
+
+    """
+    improved Bayesian Learning Rule implementation for CVI node
+        BC Parameters are mean and precision(=[μ,S]) for Gaussian
+    """
+
+    df_m(z) = ForwardDiff.derivative(logp_nc,z)
+    df_H(z) = ForwardDiff.derivative(df_m,z)
+
+    η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
+    λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
+    λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
+    λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+    opt.stable_params = deepcopy(λ_iblr) # initialize stable point
+    # Rhat Diagnostic Params
+    # J = 25
+    # Window = 1000 #also n
+    last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Window,opt,λ_iblr,logp_nc,true,msg_in)
+    println("i=0,Last_params = $(last_params[1]),Rhat=$(stats_dict[:rhat])")
+    for i = 1:num_simulations
+        last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Window,opt_matrix,last_params,logp_nc,false,msg_in)
+        println("i=$i,Last_params = $(last_params[1]),Rhat=$(stats_dict[:rhat])")
+        if all(stats_dict[:rhat] .< tau)
+            break
+        end
+    end
+    #TODO: DO the below iteration when Rhat converges or WARN THE USER that VI might not be converged
+    # After stationary point has been found / Max number of simulations
+    for i=1:num_simulations
+        last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Window,opt_matrix,last_params,logp_nc,false,msg_in)
+        # Check MCSE and ESS
+        if all(stats_dict[:mcse] .< 0.1) && all(stats_dict[:ess] .> 15.0)
+            println("Converged Parameters using Iterate Averaging = $(stats_dict[:λ_bar])")
+            break
+        end
+    end
+    #TODO: Return Natural Params in Normal Implementation
+    return last_params,opt_matrix,stats_dict
 end
 ## Distribution Specific Functions
 bcParams(dist::ProbabilityDistribution{Univariate, F}) where F<:Gaussian = [unsafeMean(dist),unsafePrecision(dist)]
