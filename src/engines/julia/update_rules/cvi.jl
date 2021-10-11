@@ -188,8 +188,8 @@ Base.@kwdef mutable struct ConvergenceStatsFE
     F_best::Float64 # Minimum attained FE
     F_best_idx::Int64 # Index of Minimum attained FE
     F_converge_idx::Int64 # Index of Minimum attained FE
-    ΔF_rel::Float64 # Relative difference between F_now and F_prev
-    ΔF_vect::Vector{Float64} # Relative difference vector
+    ΔFE_rel::Float64 # Relative difference between F_now and F_prev
+    ΔFE_vect::Vector{Float64} # Relative difference vector
     FE_vect::Vector{Float64}#TODO: delete this field later, this is for debugging
 end # struct
 Base.@kwdef mutable struct ConvergenceParamsFE <: ConvergenceOptimizer
@@ -257,7 +257,7 @@ function ConvergenceStatsFE(x::Dict)
     have_all_keys = check_all_keys(x,ConvergenceStatsFE)
     if have_all_keys
         # This code will run eventually from other outer constructors which provide x::Dict with all fields
-        return ConvergenceStatsFE(x[:F_prev],x[:F_best],x[:F_best_idx],x[:F_converge_idx],x[:ΔF_rel],x[:ΔF_vect],x[:FE_vect])
+        return ConvergenceStatsFE(x[:F_prev],x[:F_best],x[:F_best_idx],x[:F_converge_idx],x[:ΔFE_rel],x[:ΔFE_vect],x[:FE_vect])
     else
         return ConvergenceStatsFE(;x...) # refer to different outer constructor
     end
@@ -267,8 +267,8 @@ function ConvergenceStatsFE(;kwargs...)
     F_best = Inf,
     F_best_idx = -1,
     F_converge_idx = -1,
-    ΔF_rel  = Inf,
-    ΔF_vect = Vector{Float64}(),
+    ΔFE_rel  = Inf,
+    ΔFE_vect = Vector{Float64}(),
     FE_vect = Vector{Float64}()) # namedtuple with default params
     ntuple= merge(defaults,kwargs)
     settings = Dict(pairs(ntuple))
@@ -461,12 +461,12 @@ function ΔFE_check!(stats::ConvergenceStatsFE,F_now::Float64,idx_now::Int64,tol
         stats.F_best = deepcopy(F_now)
         stats.F_best_idx = deepcopy(idx_now)
     end
-    stats.ΔF_rel = abs(100*(F_now-stats.F_prev)/(stats.F_prev))
-    push!(stats.ΔF_vect,stats.ΔF_rel)
+    stats.ΔFE_rel = abs(100*(F_now-stats.F_prev)/(stats.F_prev))
+    push!(stats.ΔFE_vect,stats.ΔFE_rel)
     # Calculate mean/median
-    vect_mean = mean(stats.ΔF_vect)
-    vect_median = median(stats.ΔF_vect)
-    if (vect_mean < tolerance_mean && length(stats.ΔF_vect)>20) || (vect_median < tolerance_median && length(stats.ΔF_vect)>20)
+    vect_mean = mean(stats.ΔFE_vect)
+    vect_median = median(stats.ΔFE_vect)
+    if (vect_mean < tolerance_mean && length(stats.ΔFE_vect)>20) || (vect_median < tolerance_median && length(stats.ΔFE_vect)>20)
         stats.F_converge_idx = deepcopy(idx_now)
         stats.F_prev = deepcopy(F_now) #Also becomes F at convergence
         return true
