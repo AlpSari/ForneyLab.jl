@@ -177,6 +177,7 @@ end
 import StatsBase:percentile,autocor
 import Flux.Optimise:update!
 import Statistics:median,var
+import LinearAlgebra:norm
 
 #--- Struct definitions
 abstract type ConvergenceOptimizer end
@@ -223,6 +224,9 @@ Base.@kwdef mutable struct ParamStr2
     stepsize_update::String
     iteration_counter::Int64
     verbose::Bool
+    tau::Union{Float64,Nothing} # defined for adaptive step size
+    h̄::Union{Float64,Nothing} # defined for adaptive step size
+    ḡ::Union{Vector,Nothing} # defined for adaptive step size
 end
 
 #--- Helper functions for struct initalizations
@@ -338,7 +342,8 @@ function ParamStr2(x::Dict)
         x[:is_initialized] =false # Always false when constructed
         return ParamStr2(x[:is_initialized],x[:eta],x[:state],x[:stable_params],
         x[:convergence_algo],x[:auto_init_stepsize],x[:convergence_optimizer],
-        x[:current_stepsize],x[:stepsize_update],x[:iteration_counter],x[:verbose])
+        x[:current_stepsize],x[:stepsize_update],x[:iteration_counter],x[:verbose],
+        x[:tau],x[:h̄],x[:ḡ])
     else
         return ParamStr2(;x...) # refer to different outer constructor
     end
@@ -346,7 +351,8 @@ end
 function ParamStr2(;kwargs...)
     defaults = (is_initialized=false,eta = 0.0,state=1,stable_params=nothing,convergence_algo="free_energy",auto_init_stepsize=true,
             convergence_optimizer=ConvergenceParamsFE(),
-            current_stepsize=0.0,stepsize_update="none",iteration_counter =0,verbose=false)
+            current_stepsize=0.0,stepsize_update="none",iteration_counter =0,verbose=false,
+            tau=100.0,h̄=nothing,ḡ=nothing)
     if haskey(kwargs,:eta) # If eta is set, stepsize is manually set
         kwargs = (kwargs...,auto_init_stepsize=false)
     end
@@ -356,8 +362,7 @@ function ParamStr2(;kwargs...)
     # 1) Check if initial stepsize is given, otherwise determine it by Auto (Wolfe Condition)
     if !settings[:auto_init_stepsize]
         # Assert that user did not specify an invalid stepsize
-        # TODO: Maybe negative stepsize should be asserted along with 0.0 stepsize
-        settings[:eta] == 0.0 ? throw(ArgumentError("Stepsize ':eta' cannot be $(settings[:eta]) when step size is manually provided.")) : nothing
+        settings[:eta] <= 0.0 ? throw(ArgumentError("Provided Stepsize ':eta' cannot be negative or zero (provided stepsize:$(settings[:eta])).")) : nothing
     else
         nothing #Determine by Wolfe Condition
     end
@@ -437,7 +442,7 @@ function inexactLineSearch(logp_nc::Function,
     opt.stepsize_update = adaptStepSize_string
     return opt.eta
 end
-function adaptStepSize(opt::ParamStr2)
+function adaptStepSize(opt::ParamStr2,natgrad::Vector)
     str = opt.stepsize_update
     if str == "none"
         nothing
@@ -445,10 +450,13 @@ function adaptStepSize(opt::ParamStr2)
         if opt.iteration_counter == 0
             nothing
         else
-            opt.current_stepsize=(opt.current_stepsize)/(opt.iteration_counter)^0.55
+            opt.current_stepsize=(opt.eta)/(opt.iteration_counter)^0.55
         end
     elseif str == "adaptive"
-        nothing
+        opt.ḡ = (1-(1/opt.tau))*opt.ḡ + (1/opt.tau)*natgrad
+        opt.h̄ = (1-(1/opt.tau))*opt.h̄ + (1/opt.tau)*dot(natgrad,natgrad)
+        opt.current_stepsize = dot(opt.ḡ,opt.ḡ)/opt.h̄
+        opt.tau = opt.tau*(1-opt.current_stepsize)+1
     end
 end
 function ΔFE_check!(stats::ConvergenceStatsFE,F_now::Float64,idx_now::Int64,tolerance::Float64)
@@ -653,7 +661,19 @@ function renderCVI(logp_nc::Function,
     # 1) Check if the optimizer is initialized
     if !(opt.is_initialized)
         # Check if auto stepsize detection is requested
-        if opt.auto_init_stepsize
+        if opt.stepsize_update == "adaptive" && typeof(msg_in.dist) <: Union{ProbabilityDistribution{Multivariate,F},ProbabilityDistribution{Univariate,F}} where F<:Gaussian
+            # Initialize adaptive stepsize algorithm parameters
+            λ_bc = naturalToBCParams(msg_in.dist,λ_init)
+            g̃_func = calcNatGradBC_func(logp_nc,msg_in.dist)
+            zs_array  = sampleBCDist(msg_in.dist,λ_bc,Int64(opt.tau))
+            opt.ḡ = mean([g̃_func(z,λ_bc) for z in zs_array])
+            opt.h̄ = mean([norm(g̃_func(z,λ_bc))^2 for z in zs_array])
+            opt.eta = dot(opt.ḡ,opt.ḡ)/opt.h̄
+            opt.current_stepsize = deepcopy(opt.eta) #this is actually not the starting stepsize ,it will be set on first update! call
+            opt.iteration_counter = 0
+            # opt.currentstepsize will be  set updated in the update! function
+        elseif opt.auto_init_stepsize
+            # Find initial stepsize by inexactLineSearch
             opt.eta = inexactLineSearch(logp_nc,opt,λ_init,msg_in) #TODO: MAKE THIS RETURN DEFAULT VALUE FOR GENERIC Distribution
             opt.current_stepsize = deepcopy(opt.eta)
             opt.iteration_counter = 0
@@ -812,7 +832,7 @@ function renderCVI_MCMC(logp_nc::Function,
     if stationary_counter != 0
     λ_IA = λ_IA./stationary_counter #take average
     end
-
+    # TODO: MAKE THIS ASSIGNMENT VISIBLE IN OPT opt = deepcopy(opt_matrix[1]) # Return opt object from the first chain
     if !is_stationary_achieved
         if opt.verbose
             println("Warning: Stationary Distribution is not achieved.
@@ -865,9 +885,12 @@ function renderCVI_Basic(logp_nc::Function,
             m_prior = deepcopy(unsafeMean(msg_in.dist))
             S_prior = deepcopy(unsafePrecision(msg_in.dist))
             g_μ_2 = -df_H(z_s)+S_prior-λ_iblr[2]
-            λ_iblr[2] += opt.current_stepsize*g_μ_2
-            λ_iblr[3] = deepcopy(cholinv(λ_iblr[2]))
-            g_μ_1 = λ_iblr[3]*(df_m(z_s)+S_prior*(m_prior-λ_iblr[1]))
+            #λ_iblr[2] += opt.current_stepsize*g_μ_2 #CVI Original
+            λ_iblr[2] += opt.current_stepsize*g_μ_2+0.5*(opt.current_stepsize)^2*g_μ_2*λ_iblr[3]*g_μ_2 #MV Gauss
+            #λ_iblr[2] += opt.current_stepsize*g_μ_2+0.5*(opt.current_stepsize)^2*g_μ_2*(1/λ_iblr[2] )*g_μ_2 # UV Gauss
+            λ_iblr[3] = deepcopy(cholinv(λ_iblr[2]))#MV Gauss
+            g_μ_1 = λ_iblr[3]*(df_m(z_s)+S_prior*(m_prior-λ_iblr[1]))#MV Gauss
+            #g_μ_1 = (1/λ_iblr[2])*(df_m(z_s)+S_prior*(m_prior-λ_iblr[1])) #UV Gauss
             λ_iblr[1] += opt.current_stepsize*g_μ_1
         else
             g̃ = g̃_func(z_s,λ_iblr)
@@ -878,51 +901,51 @@ function renderCVI_Basic(logp_nc::Function,
     return λ_natural_posterior
 end
 
-function renderCVI_Rhat(logp_nc::Function,
-                   num_iterations::Int,
-                   opt::ParamStr2,
-                   λ_init::Vector,
-                   msg_in::Message{<:Gaussian, Univariate},
-                   num_simulations,tau,J,Window)
-
-    """
-    improved Bayesian Learning Rule implementation for CVI node
-        BC Parameters are mean and precision(=[μ,S]) for Gaussian
-    """
-
-    df_m(z) = ForwardDiff.derivative(logp_nc,z)
-    df_H(z) = ForwardDiff.derivative(df_m,z)
-
-    η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
-    λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
-    λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
-    λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
-    opt.stable_params = deepcopy(λ_iblr) # initialize stable point
-    # Rhat Diagnostic Params
-    # J = 25
-    # Window = 1000 #also n
-    last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Window,opt,λ_iblr,logp_nc,true,msg_in)
-    println("i=0,Last_params = $(last_params[1]),Rhat=$(stats_dict[:rhat])")
-    for i = 1:num_simulations
-        last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Window,opt_matrix,last_params,logp_nc,false,msg_in)
-        println("i=$i,Last_params = $(last_params[1]),Rhat=$(stats_dict[:rhat])")
-        if all(stats_dict[:rhat] .< tau)
-            break
-        end
-    end
-    #TODO: DO the below iteration when Rhat converges or WARN THE USER that VI might not be converged
-    # After stationary point has been found / Max number of simulations
-    for i=1:num_simulations
-        last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Window,opt_matrix,last_params,logp_nc,false,msg_in)
-        # Check MCSE and ESS
-        if all(stats_dict[:mcse] .< 0.1) && all(stats_dict[:ess] .> 15.0)
-            println("Converged Parameters using Iterate Averaging = $(stats_dict[:λ_bar])")
-            break
-        end
-    end
-    #TODO: Return Natural Params in Normal Implementation
-    return last_params,opt_matrix,stats_dict
-end
+# function renderCVI_Rhat(logp_nc::Function,
+#                    num_iterations::Int,
+#                    opt::ParamStr2,
+#                    λ_init::Vector,
+#                    msg_in::Message{<:Gaussian, Univariate},
+#                    num_simulations,tau,J,Window)
+#
+#     """
+#     improved Bayesian Learning Rule implementation for CVI node
+#         BC Parameters are mean and precision(=[μ,S]) for Gaussian
+#     """
+#
+#     df_m(z) = ForwardDiff.derivative(logp_nc,z)
+#     df_H(z) = ForwardDiff.derivative(df_m,z)
+#
+#     η = deepcopy(bcParams(msg_in.dist)) # Prior BC parameters
+#     λ_iblr = Vector{Float64}(undef,2) # Posterior BC parameter vector
+#     λ_iblr[2] = deepcopy(-2*λ_init[2]) # Precision
+#     λ_iblr[1] = deepcopy(λ_init[1]/λ_iblr[2]) # Mean
+#     opt.stable_params = deepcopy(λ_iblr) # initialize stable point
+#     # Rhat Diagnostic Params
+#     # J = 25
+#     # Window = 1000 #also n
+#     last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Window,opt,λ_iblr,logp_nc,true,msg_in)
+#     println("i=0,Last_params = $(last_params[1]),Rhat=$(stats_dict[:rhat])")
+#     for i = 1:num_simulations
+#         last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Window,opt_matrix,last_params,logp_nc,false,msg_in)
+#         println("i=$i,Last_params = $(last_params[1]),Rhat=$(stats_dict[:rhat])")
+#         if all(stats_dict[:rhat] .< tau)
+#             break
+#         end
+#     end
+#     #TODO: DO the below iteration when Rhat converges or WARN THE USER that VI might not be converged
+#     # After stationary point has been found / Max number of simulations
+#     for i=1:num_simulations
+#         last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Window,opt_matrix,last_params,logp_nc,false,msg_in)
+#         # Check MCSE and ESS
+#         if all(stats_dict[:mcse] .< 0.1) && all(stats_dict[:ess] .> 15.0)
+#             println("Converged Parameters using Iterate Averaging = $(stats_dict[:λ_bar])")
+#             break
+#         end
+#     end
+#     #TODO: Return Natural Params in Normal Implementation
+#     return last_params,opt_matrix,stats_dict
+# end
 ## Distribution Specific Functions
 bcParams(dist::ProbabilityDistribution{Univariate, F}) where F<:Gaussian = [unsafeMean(dist),unsafePrecision(dist)]
 bcParams(dist::ProbabilityDistribution{Multivariate, F}) where F<:Gaussian = [vec(unsafeMean(dist)),unsafePrecision(dist),unsafeCov(dist)]
@@ -1057,16 +1080,16 @@ function update!(opt::ParamStr2,params::Vector,natgrad::Vector,prior::Probabilit
     else
         opt.stable_params = deepcopy(params)
     end
+    # Update StepSize
+    opt.iteration_counter+=1
+    adaptStepSize(opt,natgrad)
+    # Update Parameters
     params[1] += opt.current_stepsize*natgrad[1]
     params[2] += opt.current_stepsize*natgrad[2]+0.5*(opt.current_stepsize*natgrad[2])^2/params[2]
-
     if isProper(bcToStandardDist(prior,params)) == false
         # not proper after update
         params = deepcopy(opt.stable_params)
     end
-    # Update StepSize
-    opt.iteration_counter+=1
-    adaptStepSize(opt)
     return params
 end
 function update!(opt::ParamStr2,params::Vector,natgrad::Vector,prior::ProbabilityDistribution{Multivariate, F}) where F <: Gaussian
@@ -1079,15 +1102,16 @@ function update!(opt::ParamStr2,params::Vector,natgrad::Vector,prior::Probabilit
     else
         opt.stable_params = deepcopy(params)
     end
+    # Update StepSize
+    opt.iteration_counter+=1
+    adaptStepSize(opt,natgrad)
+    # Update Parameters
     params[1] += opt.current_stepsize*natgrad[1]
     params[2] += opt.current_stepsize*natgrad[2]+0.5*(opt.current_stepsize)^2*natgrad[2]*params[3]*natgrad[2]
     params[3] = deepcopy(cholinv(params[2]))
     if isProper(bcToStandardDist(prior,params)) == false
         params = deepcopy(opt.stable_params)# not proper after update
     end
-    # Update StepSize
-    opt.iteration_counter+=1
-    adaptStepSize(opt)
     return params
 end
 
