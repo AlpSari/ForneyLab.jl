@@ -183,6 +183,8 @@ import LinearAlgebra:norm
 abstract type ConvergenceOptimizer end
 Base.@kwdef mutable struct DefaultOptim <: ConvergenceOptimizer
     max_iterations ::Int64
+    pareto_k_thr::Float64 # Pareto diagnostic threshold for scale parameter k
+    pareto_num_samples::Float64 # Num of samples used for Pareto diagnostic
 end
 Base.@kwdef mutable struct ConvergenceStatsFE
     F_prev::Float64 # FE from previous iterate
@@ -201,6 +203,8 @@ Base.@kwdef mutable struct ConvergenceParamsFE <: ConvergenceOptimizer
     tolerance_mean::Float64 # mean threshold
     tolerance_median::Float64 # median threshold
     stats::ConvergenceStatsFE # struct holding information about convergence checks
+    pareto_k_thr::Float64 # Pareto diagnostic threshold for scale parameter k
+    pareto_num_samples::Float64 # Num of samples used for Pareto diagnostic
 end # struct
 Base.@kwdef mutable struct ConvergenceParamsMC <: ConvergenceOptimizer
     max_iterations::Int64 # max number of iterations
@@ -227,6 +231,9 @@ Base.@kwdef mutable struct ParamStr2
     tau::Union{Float64,Nothing} # defined for adaptive step size
     h̄::Union{Float64,Nothing} # defined for adaptive step size
     ḡ::Union{Vector,Nothing} # defined for adaptive step size
+    tau_init::Union{Float64,Nothing} # defined for adaptive step size
+    h̄_init::Union{Float64,Nothing} # defined for adaptive step size
+    ḡ_init::Union{Vector,Nothing} # defined for adaptive step siz
 end
 
 #--- Helper functions for struct initalizations
@@ -242,13 +249,13 @@ function DefaultOptim(x::Dict)
     have_all_keys = check_all_keys(x,DefaultOptim)
     if have_all_keys
         # This code will run eventually from other outer constructors which provide x::Dict with all fields
-        return DefaultOptim(x[:max_iterations])
+        return DefaultOptim(x[:max_iterations],x[:pareto_k_thr],x[:pareto_num_samples])
     else
         return DefaultOptim(;x...) # refer to different outer constructor
     end
 end
 function DefaultOptim(;kwargs...)
-    defaults=(max_iterations =Int64(1e6),)
+    defaults=(max_iterations =Int64(1e6),pareto_k_thr=0.7,pareto_num_samples=10000.0)
     ntuple= merge(defaults,kwargs)
     settings = Dict(pairs(ntuple))
     return DefaultOptim(settings)
@@ -286,7 +293,9 @@ function ConvergenceParamsFE(;kwargs...)
             burn_in_max = 0.5,
             tolerance_mean = 0.1,
             tolerance_median = 0.1,
-            stats=ConvergenceStatsFE())
+            stats=ConvergenceStatsFE(),
+            pareto_k_thr=0.7,
+            pareto_num_samples=10000.0)
     ntuple= merge(defaults,kwargs)
     settings = Dict(pairs(ntuple))
     stats_struct =ConvergenceStatsFE(;settings...)
@@ -300,7 +309,9 @@ function ConvergenceParamsFE(x::Dict)
     have_all_keys=check_all_keys(x,ConvergenceParamsFE)
     if have_all_keys
         # This code will run eventually from other outer constructors which provide x::Dict with all fields
-        return ConvergenceParamsFE(x[:max_iterations],x[:eval_FE_window],x[:burn_in_min],x[:burn_in_max],x[:tolerance_mean],x[:tolerance_median],x[:stats])
+        return ConvergenceParamsFE(x[:max_iterations],x[:eval_FE_window],x[:burn_in_min],
+        x[:burn_in_max],x[:tolerance_mean],x[:tolerance_median],x[:stats],
+        x[:pareto_k_thr],x[:pareto_num_samples])
     else
         return ConvergenceParamsFE(;x...) # refer to different outer constructor
     end
@@ -308,7 +319,7 @@ end
 #
 function ConvergenceParamsMC(;kwargs...)
     defaults= (max_iterations= Int64(1e6),pareto_k_thr= 0.7,
-        pareto_num_samples = 1000.0,
+        pareto_num_samples = 10000.0,
         mcmc_num_chains= 10,
         mcmc_window_len= 500,
         rhat_cutoff= 1.2,
@@ -343,7 +354,7 @@ function ParamStr2(x::Dict)
         return ParamStr2(x[:is_initialized],x[:eta],x[:state],x[:stable_params],
         x[:convergence_algo],x[:auto_init_stepsize],x[:convergence_optimizer],
         x[:current_stepsize],x[:stepsize_update],x[:iteration_counter],x[:verbose],
-        x[:tau],x[:h̄],x[:ḡ])
+        x[:tau],x[:h̄],x[:ḡ],x[:tau_init],x[:h̄_init],x[:ḡ_init])
     else
         return ParamStr2(;x...) # refer to different outer constructor
     end
@@ -352,7 +363,8 @@ function ParamStr2(;kwargs...)
     defaults = (is_initialized=false,eta = 0.0,state=1,stable_params=nothing,convergence_algo="free_energy",auto_init_stepsize=true,
             convergence_optimizer=ConvergenceParamsFE(),
             current_stepsize=0.0,stepsize_update="none",iteration_counter =0,verbose=false,
-            tau=100.0,h̄=nothing,ḡ=nothing)
+            tau=100.0,h̄=nothing,ḡ=nothing,
+            tau_init=100.0,h̄_init=nothing,ḡ_init=nothing)
     if haskey(kwargs,:eta) # If eta is set, stepsize is manually set
         kwargs = (kwargs...,auto_init_stepsize=false)
     end
@@ -377,7 +389,7 @@ function ParamStr2(;kwargs...)
     elseif convergence_algo_str == "none"
         optim_alias = DefaultOptim
     else
-        throw(ArgumentError("Invalid string ('$convergence_algo_str') for convergence algorithm specification"))
+        throw(ArgumentError("Invalid string ('$convergence_algo_str') for convergence algorithm specification, possible choices are ['none','free_energy','MonteCarlo']"))
     end
         #Init Optim struct
         optimizer = optim_alias(settings)
@@ -398,22 +410,18 @@ function inexactLineSearch(logp_nc::Function,
 
     η = bcParams(msg_in.dist)
     λ_linesearch = deepcopy(naturalToBCParams(msg_in.dist,λ_init))
-    max_iterations = 100
+    max_iterations = min(200.0,opt.convergence_optimizer.max_iterations/100)
     opt.current_stepsize =0.999
     g̃_func = calcNatGradBC_func(logp_nc,msg_in.dist)
-
     is_found  = false
-
-    zs_array  = sampleBCDist(msg_in.dist,λ_linesearch,100)
+    zs_array  = sampleBCDist(msg_in.dist,λ_linesearch,200)
     FE_prev = KL_bc(λ_linesearch,η,msg_in.dist) - mean(logp_nc.(zs_array))
     λ_linesearch_new = deepcopy(λ_linesearch)
-
+    g̃ = mean([g̃_func(z,λ_linesearch) for z in zs_array])
     for i=1:max_iterations
-
         λ_linesearch_new = deepcopy(λ_linesearch)
-        g̃ = mean([g̃_func(z,λ_linesearch) for z in zs_array])
         update!(opt,λ_linesearch_new,g̃,msg_in.dist)
-        zs_array_new = sampleBCDist(msg_in.dist,λ_linesearch_new,100)
+        zs_array_new = sampleBCDist(msg_in.dist,λ_linesearch_new,200)
         FE_now = KL_bc(λ_linesearch_new,η,msg_in.dist) - mean(logp_nc.(zs_array_new))
         if FE_now < FE_prev
             is_found = true
@@ -421,13 +429,16 @@ function inexactLineSearch(logp_nc::Function,
             opt.iteration_counter = 0
             break
         else
-            opt.current_stepsize = opt.current_stepsize * 0.15
-            λ_linesearch = λ_linesearch_new
-            zs_array = zs_array_new
-            FE_prev = FE_now
+            opt.current_stepsize = opt.current_stepsize * 0.9
+            # λ_linesearch = λ_linesearch_new
+            # zs_array = zs_array_new
+            # FE_prev = FE_now
+        end
+        if opt.current_stepsize == 0.0
+            is_found = false
+            break
         end
     end
-
     if is_found == false
         if opt.verbose
             println("inexactLineSearch failed, setting initial stepsize to $(stepsize_failsafe)")
@@ -631,6 +642,10 @@ function Pareto_k_fit(logp_nc::Function,msg_in::Message{<:FactorNode, <:VariateT
     #
     samples = sampleBCDist(msg_in.dist,λ_bc,S)
     rs_samples = rs.(samples)
+    if any(isnan.(rs_samples))
+        k̂_new= NaN
+        return k̂_new
+    end
     data = rs_samples[partialsortperm(rs_samples, 1:M,rev=true)]# Fit using M largest
     n=length(data)
     # Zhang and Stephens(2009) method
@@ -671,6 +686,11 @@ function renderCVI(logp_nc::Function,
             opt.eta = dot(opt.ḡ,opt.ḡ)/opt.h̄
             opt.current_stepsize = deepcopy(opt.eta) #this is actually not the starting stepsize ,it will be set on first update! call
             opt.iteration_counter = 0
+
+
+            opt.ḡ_init = deepcopy(opt.ḡ)
+            opt.h̄_init = deepcopy(opt.h̄)
+            opt.tau_init = deepcopy(opt.tau)
             # opt.currentstepsize will be  set updated in the update! function
         elseif opt.auto_init_stepsize
             # Find initial stepsize by inexactLineSearch
@@ -684,9 +704,22 @@ function renderCVI(logp_nc::Function,
         end
         opt.is_initialized = true
     else
-        # Reset the step size to initial value
-        opt.current_stepsize = deepcopy(opt.eta)
-        opt.iteration_counter = 0
+        if opt.stepsize_update == "adaptive" && typeof(msg_in.dist) <: Union{ProbabilityDistribution{Multivariate,F},ProbabilityDistribution{Univariate,F}} where F<:Gaussian
+            # Reset opt.ḡ and opt.h̄
+            λ_bc = naturalToBCParams(msg_in.dist,λ_init)
+            g̃_func = calcNatGradBC_func(logp_nc,msg_in.dist)
+            zs_array  = sampleBCDist(msg_in.dist,λ_bc,Int64(opt.tau_init))
+            opt.ḡ = mean([g̃_func(z,λ_bc) for z in zs_array])
+            opt.h̄ = mean([norm(g̃_func(z,λ_bc))^2 for z in zs_array])
+            opt.tau = deepcopy(opt.tau_init)
+            opt.eta = dot(opt.ḡ,opt.ḡ)/opt.h̄
+            opt.current_stepsize = deepcopy(opt.eta) #this is actually not the starting stepsize ,it will be set on first update! call
+            opt.iteration_counter = 0
+        else
+            # Reset the step size to initial value
+            opt.current_stepsize = deepcopy(opt.eta)
+            opt.iteration_counter = 0
+        end
     end
     # 2) Run Optimization Loop depending on the type of ConvergenceOptimizer
     convergence_optimizer = opt.convergence_optimizer
@@ -786,6 +819,18 @@ function renderCVI_ΔFE(logp_nc::Function,
         #return last iterate
         λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
     end
+    if opt.verbose
+        λ_bc = naturalToBCParams(msg_in.dist,λ_natural_posterior)
+        S = Int64(convergence_optimizer.pareto_num_samples)
+        k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_bc,S)
+        if isnan(k̂_new)
+            println("Importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
+        elseif k̂_new >= convergence_optimizer.pareto_k_thr
+            println("Warning, fitted Pareto shape parameter =$k̂_new>=$(convergence_optimizer.pareto_k_thr)!")
+        else
+            println("Fitted Pareto shape parameter = $k̂_new")
+        end
+    end
     return λ_natural_posterior
 end
 function renderCVI_MCMC(logp_nc::Function,
@@ -846,9 +891,10 @@ function renderCVI_MCMC(logp_nc::Function,
         return bcToNaturalParams(msg_in.dist,λ_IA)
     else
         S = Int64(convergence_optimizer.pareto_num_samples)
-        println("λ_IA=$λ_IA")
         k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_IA,S)
-        if k̂_new >= convergence_optimizer.pareto_k_thr
+        if isnan(k̂_new)
+            println("Stationary distribution achieved,, but importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
+        elseif k̂_new >= convergence_optimizer.pareto_k_thr
             if opt.verbose
                  println("Stationary distribution achieved but thresholds are not satisfied.
                  VI result might be inaccurate! Pareto scale parameter k̂ to importance ratios
@@ -879,9 +925,19 @@ function renderCVI_Basic(logp_nc::Function,
     opt.stable_params = deepcopy(λ_iblr) # initialize stable point
     for i=1:convergence_optimizer.max_iterations
         z_s = sampleBCDist(msg_in.dist,λ_iblr)
-        if i ==0 #make this 1 to implement first update as CVI for Multivariate Gaussian
-            df_m(z) = ForwardDiff.gradient(logp_nc,z)
-            df_H(z) = ForwardDiff.jacobian(df_m,z)
+        if length(z_s) == 1 && i == 0
+            df_mu(z) = ForwardDiff.derivative(logp_nc,z)
+            df_Hu(z) = ForwardDiff.derivative(df_mu,z)
+            m_prior = deepcopy(unsafeMean(msg_in.dist))
+            S_prior = deepcopy(unsafePrecision(msg_in.dist))
+            g_μ_2 = -df_Hu(z_s)+S_prior-λ_iblr[2]
+            λ_iblr[2] += opt.current_stepsize*g_μ_2+0.5*(opt.current_stepsize)^2*g_μ_2*(1/λ_iblr[2] )*g_μ_2 # UV Gauss
+            g_μ_1 = (1/λ_iblr[2])*(df_mu(z_s)+S_prior*(m_prior-λ_iblr[1])) #UV Gauss
+            λ_iblr[1] += opt.current_stepsize*g_μ_1
+
+        elseif i == 0 #make this 1 to implement first update as CVI for Multivariate Gaussian
+            df_m(z) = z->ForwardDiff.gradient(logp_nc,z)
+            df_H(z) = z->ForwardDiff.jacobian(df_m,z)
             m_prior = deepcopy(unsafeMean(msg_in.dist))
             S_prior = deepcopy(unsafePrecision(msg_in.dist))
             g_μ_2 = -df_H(z_s)+S_prior-λ_iblr[2]
@@ -898,6 +954,18 @@ function renderCVI_Basic(logp_nc::Function,
         end
     end
     λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
+    if opt.verbose
+        λ_bc = naturalToBCParams(msg_in.dist,λ_natural_posterior)
+        S = Int64(convergence_optimizer.pareto_num_samples)
+        k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_bc,S)
+        if isnan(k̂_new)
+            println("Importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
+        elseif k̂_new >= convergence_optimizer.pareto_k_thr
+            println("Warning, fitted Pareto shape parameter =$k̂_new>=$(convergence_optimizer.pareto_k_thr)!")
+        else
+            println("Fitted Pareto shape parameter = $k̂_new")
+        end
+    end
     return λ_natural_posterior
 end
 
@@ -1084,8 +1152,16 @@ function update!(opt::ParamStr2,params::Vector,natgrad::Vector,prior::Probabilit
     opt.iteration_counter+=1
     adaptStepSize(opt,natgrad)
     # Update Parameters
-    params[1] += opt.current_stepsize*natgrad[1]
-    params[2] += opt.current_stepsize*natgrad[2]+0.5*(opt.current_stepsize*natgrad[2])^2/params[2]
+    if opt.iteration_counter ==1
+        natgrad[1]= params[2]*natgrad[1]
+        params[2] += opt.current_stepsize*natgrad[2]+0.5*(opt.current_stepsize*natgrad[2])^2/params[2]
+        natgrad[1] = natgrad[1]/params[2]
+        params[1] += opt.current_stepsize*natgrad[1]
+    else
+        params[1] += opt.current_stepsize*natgrad[1]
+        params[2] += opt.current_stepsize*natgrad[2]+0.5*(opt.current_stepsize*natgrad[2])^2/params[2]
+    end
+
     if isProper(bcToStandardDist(prior,params)) == false
         # not proper after update
         params = deepcopy(opt.stable_params)
@@ -1106,9 +1182,17 @@ function update!(opt::ParamStr2,params::Vector,natgrad::Vector,prior::Probabilit
     opt.iteration_counter+=1
     adaptStepSize(opt,natgrad)
     # Update Parameters
-    params[1] += opt.current_stepsize*natgrad[1]
-    params[2] += opt.current_stepsize*natgrad[2]+0.5*(opt.current_stepsize)^2*natgrad[2]*params[3]*natgrad[2]
-    params[3] = deepcopy(cholinv(params[2]))
+    if opt.iteration_counter ==1
+        natgrad[1] = params[2]*natgrad[1]
+        params[2] += opt.current_stepsize*natgrad[2]+0.5*(opt.current_stepsize)^2*natgrad[2]*params[3]*natgrad[2]
+        params[3] = deepcopy(cholinv(params[2]))
+        natgrad[1] = params[3]*natgrad[1]
+        params[1] += opt.current_stepsize*natgrad[1]
+    else
+        params[1] += opt.current_stepsize*natgrad[1]
+        params[2] += opt.current_stepsize*natgrad[2]+0.5*(opt.current_stepsize)^2*natgrad[2]*params[3]*natgrad[2]
+        params[3] = deepcopy(cholinv(params[2]))
+    end
     if isProper(bcToStandardDist(prior,params)) == false
         params = deepcopy(opt.stable_params)# not proper after update
     end
