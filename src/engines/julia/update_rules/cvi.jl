@@ -216,7 +216,7 @@ Base.@kwdef mutable struct ConvergenceParamsMC <: ConvergenceOptimizer
     mcse_cutoff::Float64 # Monte Carlo Standard Error maximum value
     ess_threshold::Float64 # Effective Sample Size minimum value
 end # struct
-Base.@kwdef mutable struct ParamStr2
+Base.@kwdef mutable struct iBLR
     is_initialized::Bool
     eta::Float64
     state::Int64 #TODO: Delete later
@@ -345,24 +345,24 @@ function ConvergenceParamsMC(x::Dict)
     end
 end
 #
-function ParamStr2(x::Dict)
+function iBLR(x::Dict)
     if length(keys(x)) == 0
-        return ParamStr2()
+        return iBLR()
     end
-    have_all_keys_params = check_all_keys(x,ParamStr2)
+    have_all_keys_params = check_all_keys(x,iBLR)
     if have_all_keys_params
         # This code will run eventually from other outer constructors which provide x::Dict with all fields
         x[:is_initialized] =false # Always false when constructed
-        return ParamStr2(x[:is_initialized],x[:eta],x[:state],x[:stable_params],
+        return iBLR(x[:is_initialized],x[:eta],x[:state],x[:stable_params],
         x[:convergence_algo],x[:auto_init_stepsize],x[:convergence_optimizer],
         x[:current_stepsize],x[:stepsize_update],x[:iteration_counter],x[:verbose],
         x[:tau],x[:h̄],x[:ḡ],x[:tau_init],x[:h̄_init],x[:ḡ_init],
         x[:vmp_params],x[:pareto_k_fit])
     else
-        return ParamStr2(;x...) # refer to different outer constructor
+        return iBLR(;x...) # refer to different outer constructor
     end
 end
-function ParamStr2(;kwargs...)
+function iBLR(;kwargs...)
     defaults = (is_initialized=false,eta = 0.0,state=1,stable_params=nothing,convergence_algo="none",auto_init_stepsize=true,
             convergence_optimizer=DefaultOptim(),
             current_stepsize=0.0,stepsize_update="none",iteration_counter =0,verbose=false,
@@ -400,11 +400,11 @@ function ParamStr2(;kwargs...)
         # Make Adjustments to Settings
         settings[:convergence_optimizer] = optimizer
 
-        return ParamStr2(settings)
+        return iBLR(settings)
 end
 #--- renderCVI function
 function inexactLineSearch(logp_nc::Function,
-                   opt::ParamStr2,
+                   opt::iBLR,
                    λ_init::Vector,
                    msg_in::Message{<:Gaussian, Univariate})
 
@@ -457,7 +457,7 @@ function inexactLineSearch(logp_nc::Function,
     opt.stepsize_update = adaptStepSize_string
     return opt.eta
 end
-function adaptStepSize(opt::ParamStr2,natgrad::Vector)
+function adaptStepSize(opt::iBLR,natgrad::Vector)
     str = opt.stepsize_update
     if str == "none"
         nothing
@@ -672,7 +672,7 @@ function Pareto_k_fit(logp_nc::Function,msg_in::Message{<:FactorNode, <:VariateT
 end
 function renderCVI(logp_nc::Function,
                    num_iterations::Int,
-                   opt::ParamStr2,
+                   opt::iBLR,
                    λ_init::Vector,
                    msg_in::Message{<:FactorNode, <:VariateType})
 
@@ -748,7 +748,7 @@ function renderCVI(logp_nc::Function,
     return λ_natural_posterior
 end
 function renderCVI_ΔFE(logp_nc::Function,
-                   opt::ParamStr2,
+                   opt::iBLR,
                    λ_init::Vector,
                    msg_in::Message{<:FactorNode, <:VariateType})
 
@@ -832,19 +832,19 @@ function renderCVI_ΔFE(logp_nc::Function,
 
         if isnan(k̂_new)
             #println("Importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
-            println("Warning! Convergence Diagnostic Score is = $k̂_new")
+            println("Warning! Convergence diagnostic indicator is = $k̂_new")
         elseif k̂_new >= convergence_optimizer.pareto_k_thr
             #println("Warning, fitted Pareto shape parameter = $k̂_new ")#≧ $(convergence_optimizer.pareto_k_thr)!")
-            println("Warning! Convergence Diagnostic Score is = $k̂_new")
+            println("Warning! Convergence diagnostic indicator is = $k̂_new")
         else
             #println("Fitted Pareto shape parameter = $k̂_new")
-            println("Convergence Diagnostic Score is = $k̂_new")
+            println("Convergence diagnostic indicator is = $k̂_new")
         end
     end
     return λ_natural_posterior
 end
 function renderCVI_MCMC(logp_nc::Function,
-                   opt::ParamStr2,
+                   opt::iBLR,
                    λ_init::Vector,
                    msg_in::Message{<:FactorNode, <:VariateType})
 
@@ -907,13 +907,13 @@ function renderCVI_MCMC(logp_nc::Function,
 
         if isnan(k̂_new)
             #println("Stationary distribution achieved,, but importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
-            println("Stationary distribution achieved,, but importance ratios are 0, Convergence Diagnostic Score is = $k̂_new")
+            println("Stationary distribution achieved,, but importance ratios are 0, Convergence diagnostic indicator is = $k̂_new")
         elseif k̂_new >= convergence_optimizer.pareto_k_thr
             if opt.verbose
                  # println("Stationary distribution achieved but thresholds are not satisfied.
                  # VI result might be inaccurate! Fitted pareto shape parameter k̂ to importance ratios
                  # is k̂ = $k̂_new ")#≧ $(convergence_optimizer.pareto_k_thr)")
-                 println("Warning! Stationary distribution achieved, but Convergence Diagnostic Score is = $k̂_new")
+                 println("Warning! Stationary distribution achieved, but Convergence diagnostic indicator is = $k̂_new")
             end
         else
             if opt.verbose
@@ -927,7 +927,7 @@ function renderCVI_MCMC(logp_nc::Function,
     end
 end
 function renderCVI_Basic(logp_nc::Function,
-                   opt::ParamStr2,
+                   opt::iBLR,
                    λ_init::Vector,
                    msg_in::Message{<:FactorNode, <:VariateType})
 
@@ -954,13 +954,13 @@ function renderCVI_Basic(logp_nc::Function,
 
         if isnan(k̂_new)
             #println("Importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
-            println("Warning!, Convergence Diagnostic Score is = $k̂_new")
+            println("Warning!, Convergence diagnostic indicator is = $k̂_new")
         elseif k̂_new >= convergence_optimizer.pareto_k_thr
             #println("Warning, fitted Pareto shape parameter = $k̂_new")# ≧ $(convergence_optimizer.pareto_k_thr)!")
-            println("Warning!, Convergence Diagnostic Score is = $k̂_new")
+            println("Warning!, Convergence diagnostic indicator is = $k̂_new")
         else
             #println("Fitted Pareto shape parameter = $k̂_new")
-            println("Convergence Diagnostic Score is = $k̂_new")
+            println("Convergence diagnostic indicator is = $k̂_new")
         end
     end
     return λ_natural_posterior
@@ -968,7 +968,7 @@ end
 
 # function renderCVI_Rhat(logp_nc::Function,
 #                    num_iterations::Int,
-#                    opt::ParamStr2,
+#                    opt::iBLR,
 #                    λ_init::Vector,
 #                    msg_in::Message{<:Gaussian, Univariate},
 #                    num_simulations,tau,J,Window)
@@ -1135,7 +1135,7 @@ function getStatisticsIndexMC(dist::ProbabilityDistribution{Multivariate, F}) wh
     range_of_interest = 1:n
     return idx_of_interest,range_of_interest #Mean is the first index
 end
-function update!(opt::ParamStr2,params::Vector,natgrad::Vector,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
+function update!(opt::iBLR,params::Vector,natgrad::Vector,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
     #TODO #1) Update currentstepsize after each iteration
     #params = [μ,S]
     push!(opt.vmp_params,[deepcopy(params)]) # TODO: DELETE LATER AFTER FINISHING THE REPORT
@@ -1166,7 +1166,7 @@ function update!(opt::ParamStr2,params::Vector,natgrad::Vector,prior::Probabilit
     end
     return params
 end
-function update!(opt::ParamStr2,params::Vector,natgrad::Vector,prior::ProbabilityDistribution{Multivariate, F}) where F <: Gaussian
+function update!(opt::iBLR,params::Vector,natgrad::Vector,prior::ProbabilityDistribution{Multivariate, F}) where F <: Gaussian
     #params = [vec(μ),mat(S),mat(Σ)]
     any_nan_value = any(any.((x->isnan.(x)).(natgrad)))
     any_inf_value = any(any.((x->isinf.(x)).(natgrad)))
@@ -1757,7 +1757,7 @@ end
 # end
 # function renderCVI_Rhat(logp_nc::Function,
 #                    num_iterations::Int,
-#                    opt::Union{iBLR,ParamStr2},
+#                    opt::Union{iBLR,iBLR},
 #                    λ_init::Vector,
 #                    msg_in::Message{<:Gaussian, Univariate},
 #                    num_simulations,tau,J,Window)
