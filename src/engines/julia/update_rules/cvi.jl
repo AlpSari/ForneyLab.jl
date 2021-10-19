@@ -234,6 +234,8 @@ Base.@kwdef mutable struct ParamStr2
     tau_init::Union{Float64,Nothing} # defined for adaptive step size
     h̄_init::Union{Float64,Nothing} # defined for adaptive step size
     ḡ_init::Union{Vector,Nothing} # defined for adaptive step siz
+    vmp_params::Vector
+    pareto_k_fit::Any
 end
 
 #--- Helper functions for struct initalizations
@@ -255,7 +257,7 @@ function DefaultOptim(x::Dict)
     end
 end
 function DefaultOptim(;kwargs...)
-    defaults=(max_iterations =Int64(1e6),pareto_k_thr=0.7,pareto_num_samples=10000.0)
+    defaults=(max_iterations =Int64(1e5),pareto_k_thr=0.7,pareto_num_samples=10000.0)
     ntuple= merge(defaults,kwargs)
     settings = Dict(pairs(ntuple))
     return DefaultOptim(settings)
@@ -287,7 +289,7 @@ function ConvergenceStatsFE(;kwargs...)
 end
 #
 function ConvergenceParamsFE(;kwargs...)
-    defaults =(max_iterations= Int64(1e6),
+    defaults =(max_iterations= Int64(1e5),
             eval_FE_window=0.002,
             burn_in_min = 0.05,
             burn_in_max = 0.5,
@@ -318,7 +320,7 @@ function ConvergenceParamsFE(x::Dict)
 end
 #
 function ConvergenceParamsMC(;kwargs...)
-    defaults= (max_iterations= Int64(1e6),pareto_k_thr= 0.7,
+    defaults= (max_iterations= Int64(1e5),pareto_k_thr= 0.7,
         pareto_num_samples = 10000.0,
         mcmc_num_chains= 10,
         mcmc_window_len= 500,
@@ -354,17 +356,19 @@ function ParamStr2(x::Dict)
         return ParamStr2(x[:is_initialized],x[:eta],x[:state],x[:stable_params],
         x[:convergence_algo],x[:auto_init_stepsize],x[:convergence_optimizer],
         x[:current_stepsize],x[:stepsize_update],x[:iteration_counter],x[:verbose],
-        x[:tau],x[:h̄],x[:ḡ],x[:tau_init],x[:h̄_init],x[:ḡ_init])
+        x[:tau],x[:h̄],x[:ḡ],x[:tau_init],x[:h̄_init],x[:ḡ_init],
+        x[:vmp_params],x[:pareto_k_fit])
     else
         return ParamStr2(;x...) # refer to different outer constructor
     end
 end
 function ParamStr2(;kwargs...)
-    defaults = (is_initialized=false,eta = 0.0,state=1,stable_params=nothing,convergence_algo="free_energy",auto_init_stepsize=true,
-            convergence_optimizer=ConvergenceParamsFE(),
+    defaults = (is_initialized=false,eta = 0.0,state=1,stable_params=nothing,convergence_algo="none",auto_init_stepsize=true,
+            convergence_optimizer=DefaultOptim(),
             current_stepsize=0.0,stepsize_update="none",iteration_counter =0,verbose=false,
             tau=100.0,h̄=nothing,ḡ=nothing,
-            tau_init=100.0,h̄_init=nothing,ḡ_init=nothing)
+            tau_init=100.0,h̄_init=nothing,ḡ_init=nothing,
+            vmp_params=[],pareto_k_fit=nothing)
     if haskey(kwargs,:eta) # If eta is set, stepsize is manually set
         kwargs = (kwargs...,auto_init_stepsize=false)
     end
@@ -380,9 +384,9 @@ function ParamStr2(;kwargs...)
     end
     # 2) Check convergence algo string to determine convergence_optimizer type
     if convergence_algo_str == "free_energy"
-        if ! (typeof(settings[:convergence_optimizer]) == ConvergenceParamsFE) #throw error since this is the default choice
-            throw(ArgumentError("Invalid choice of optimizer ($convergence_optimizer) for the given convergence algorithm."))
-        end
+        # if ! (typeof(settings[:convergence_optimizer]) == ConvergenceParamsFE) #throw error since this is the default choice
+        #     throw(ArgumentError("Invalid choice of optimizer ($convergence_optimizer) for the given convergence algorithm."))
+        # end
         optim_alias = ConvergenceParamsFE
     elseif convergence_algo_str == "MonteCarlo"
         optim_alias = ConvergenceParamsMC
@@ -785,14 +789,14 @@ function renderCVI_ΔFE(logp_nc::Function,
             if FE_check == false && FE < stats.F_best
                 FE_check = true # FE dropped below initial ELBO
                 if opt.verbose
-                    println("FE ($FE) is smaller now,FE_check starts when i=$i")
+                    #println("FE ($FE) is smaller now,FE_check starts when i=$i")
                 end
 
             # Second condition to start tests: i exceeds burn_in_max period
             elseif FE_check == false && i > burn_in_max
                 FE_check = true
                 if opt.verbose
-                    println("Burninmax reached ($burn_in_max), FE_check starts when i=$i")
+                    #println("Burninmax reached ($burn_in_max), FE_check starts when i=$i")
                 end
             end
             # If tests start, check convergence
@@ -823,12 +827,18 @@ function renderCVI_ΔFE(logp_nc::Function,
         λ_bc = naturalToBCParams(msg_in.dist,λ_natural_posterior)
         S = Int64(convergence_optimizer.pareto_num_samples)
         k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_bc,S)
+
+        opt.pareto_k_fit = k̂_new #TODO: Delete after presentation
+
         if isnan(k̂_new)
-            println("Importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
+            #println("Importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
+            println("Warning! Convergence Diagnostic Score is = $k̂_new")
         elseif k̂_new >= convergence_optimizer.pareto_k_thr
-            println("Warning, fitted Pareto shape parameter =$k̂_new>=$(convergence_optimizer.pareto_k_thr)!")
+            #println("Warning, fitted Pareto shape parameter = $k̂_new ")#≧ $(convergence_optimizer.pareto_k_thr)!")
+            println("Warning! Convergence Diagnostic Score is = $k̂_new")
         else
-            println("Fitted Pareto shape parameter = $k̂_new")
+            #println("Fitted Pareto shape parameter = $k̂_new")
+            println("Convergence Diagnostic Score is = $k̂_new")
         end
     end
     return λ_natural_posterior
@@ -892,19 +902,25 @@ function renderCVI_MCMC(logp_nc::Function,
     else
         S = Int64(convergence_optimizer.pareto_num_samples)
         k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_IA,S)
+
+        opt.pareto_k_fit = k̂_new
+
         if isnan(k̂_new)
-            println("Stationary distribution achieved,, but importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
+            #println("Stationary distribution achieved,, but importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
+            println("Stationary distribution achieved,, but importance ratios are 0, Convergence Diagnostic Score is = $k̂_new")
         elseif k̂_new >= convergence_optimizer.pareto_k_thr
             if opt.verbose
-                 println("Stationary distribution achieved but thresholds are not satisfied.
-                 VI result might be inaccurate! Pareto scale parameter k̂ to importance ratios
-                 are k̂=$k̂_new >=$(convergence_optimizer.pareto_k_thr)")
+                 # println("Stationary distribution achieved but thresholds are not satisfied.
+                 # VI result might be inaccurate! Fitted pareto shape parameter k̂ to importance ratios
+                 # is k̂ = $k̂_new ")#≧ $(convergence_optimizer.pareto_k_thr)")
+                 println("Warning! Stationary distribution achieved, but Convergence Diagnostic Score is = $k̂_new")
             end
         else
             if opt.verbose
-                println("Stationary distribution achieved,
-                Monte Carlo Standard Error and Effective Sample Size thresholds are not satisfied.
-                Pareto shape parameter k̂ fitted to importance ratios are k̂=$k̂_new")
+                # println("Stationary distribution achieved,
+                # Monte Carlo Standard Error and Effective Sample Size thresholds are not satisfied.
+                # Pareto shape parameter k̂ fitted to importance ratios is k̂=$k̂_new")
+                println("Stationary distribution achieved, but number of iterations used for iterate averaging might be less than necessary. Convergence Diagnostic Score is = $k̂_new")
             end
         end
         return bcToNaturalParams(msg_in.dist,λ_IA)
@@ -925,45 +941,26 @@ function renderCVI_Basic(logp_nc::Function,
     opt.stable_params = deepcopy(λ_iblr) # initialize stable point
     for i=1:convergence_optimizer.max_iterations
         z_s = sampleBCDist(msg_in.dist,λ_iblr)
-        if length(z_s) == 1 && i == 0
-            df_mu(z) = ForwardDiff.derivative(logp_nc,z)
-            df_Hu(z) = ForwardDiff.derivative(df_mu,z)
-            m_prior = deepcopy(unsafeMean(msg_in.dist))
-            S_prior = deepcopy(unsafePrecision(msg_in.dist))
-            g_μ_2 = -df_Hu(z_s)+S_prior-λ_iblr[2]
-            λ_iblr[2] += opt.current_stepsize*g_μ_2+0.5*(opt.current_stepsize)^2*g_μ_2*(1/λ_iblr[2] )*g_μ_2 # UV Gauss
-            g_μ_1 = (1/λ_iblr[2])*(df_mu(z_s)+S_prior*(m_prior-λ_iblr[1])) #UV Gauss
-            λ_iblr[1] += opt.current_stepsize*g_μ_1
-
-        elseif i == 0 #make this 1 to implement first update as CVI for Multivariate Gaussian
-            df_m(z) = z->ForwardDiff.gradient(logp_nc,z)
-            df_H(z) = z->ForwardDiff.jacobian(df_m,z)
-            m_prior = deepcopy(unsafeMean(msg_in.dist))
-            S_prior = deepcopy(unsafePrecision(msg_in.dist))
-            g_μ_2 = -df_H(z_s)+S_prior-λ_iblr[2]
-            #λ_iblr[2] += opt.current_stepsize*g_μ_2 #CVI Original
-            λ_iblr[2] += opt.current_stepsize*g_μ_2+0.5*(opt.current_stepsize)^2*g_μ_2*λ_iblr[3]*g_μ_2 #MV Gauss
-            #λ_iblr[2] += opt.current_stepsize*g_μ_2+0.5*(opt.current_stepsize)^2*g_μ_2*(1/λ_iblr[2] )*g_μ_2 # UV Gauss
-            λ_iblr[3] = deepcopy(cholinv(λ_iblr[2]))#MV Gauss
-            g_μ_1 = λ_iblr[3]*(df_m(z_s)+S_prior*(m_prior-λ_iblr[1]))#MV Gauss
-            #g_μ_1 = (1/λ_iblr[2])*(df_m(z_s)+S_prior*(m_prior-λ_iblr[1])) #UV Gauss
-            λ_iblr[1] += opt.current_stepsize*g_μ_1
-        else
-            g̃ = g̃_func(z_s,λ_iblr)
-            update!(opt,λ_iblr,g̃,msg_in.dist)
-        end
+        g̃ = g̃_func(z_s,λ_iblr)
+        update!(opt,λ_iblr,g̃,msg_in.dist)
     end
     λ_natural_posterior = bcToNaturalParams(msg_in.dist,λ_iblr)
     if opt.verbose
         λ_bc = naturalToBCParams(msg_in.dist,λ_natural_posterior)
         S = Int64(convergence_optimizer.pareto_num_samples)
         k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_bc,S)
+
+        opt.pareto_k_fit = k̂_new
+
         if isnan(k̂_new)
-            println("Importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
+            #println("Importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
+            println("Warning!, Convergence Diagnostic Score is = $k̂_new")
         elseif k̂_new >= convergence_optimizer.pareto_k_thr
-            println("Warning, fitted Pareto shape parameter =$k̂_new>=$(convergence_optimizer.pareto_k_thr)!")
+            #println("Warning, fitted Pareto shape parameter = $k̂_new")# ≧ $(convergence_optimizer.pareto_k_thr)!")
+            println("Warning!, Convergence Diagnostic Score is = $k̂_new")
         else
-            println("Fitted Pareto shape parameter = $k̂_new")
+            #println("Fitted Pareto shape parameter = $k̂_new")
+            println("Convergence Diagnostic Score is = $k̂_new")
         end
     end
     return λ_natural_posterior
@@ -1141,6 +1138,7 @@ end
 function update!(opt::ParamStr2,params::Vector,natgrad::Vector,prior::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
     #TODO #1) Update currentstepsize after each iteration
     #params = [μ,S]
+    push!(opt.vmp_params,[deepcopy(params)]) # TODO: DELETE LATER AFTER FINISHING THE REPORT
     if any(isnan.(natgrad)) || any(isinf.(natgrad))
         params = deepcopy(opt.stable_params)
 
