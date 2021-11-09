@@ -862,7 +862,8 @@ function renderCVI_MCMC(logp_nc::Function,
     is_mcmc_converged= false
     λ_IA = initBCParams(msg_in.dist) #Distribution specific --> All zeros
     stationary_counter = 0
-
+    #TODO: After stationarity is achived MCSE and ESS Should be calculated from not just one window but all the samples after stationarity
+    #TODO: Write another function for the simulation after stationarity
     # First simulation
     #println(λ_iblr,)
     last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Int64(W),opt,λ_iblr,logp_nc,true,msg_in)
