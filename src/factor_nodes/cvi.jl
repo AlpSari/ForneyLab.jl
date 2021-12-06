@@ -49,12 +49,14 @@ mutable struct CVI <: DeltaFactor
     online_inference::Union{Bool,Vector{Bool}}
     batch_size::Int
     dataset_size::Int
+    convergence_optimizer::Union{Nothing,ConvergenceOptimizer}
 
     function CVI(id::Symbol, g::Function,
                     opt::Any,
                     num_iterations::Union{Int,Vector{Int}}, num_samples::Int, q::Vector{<:ProbabilityDistribution},
                     infer_memory::Int, proper_message::Bool, online_inference::Union{Bool,Vector{Bool}},
-                    batch_size::Int, dataset_size::Int, out::Variable, args::Vararg)
+                    batch_size::Int, dataset_size::Int, convergence_optimizer::Union{Nothing,ConvergenceOptimizer},
+                    out::Variable, args::Vararg)
         @ensureVariables(out)
         n_args = length(args)
         for i=1:n_args
@@ -68,7 +70,7 @@ mutable struct CVI <: DeltaFactor
             end
         end
         self = new(id, Array{Interface}(undef, n_args+1), Dict{Int,Interface}(), g, opt, num_iterations, num_samples,
-                    q, deepcopy(q), infer_memory, proper_message, online_inference_use, batch_size, dataset_size)
+                    q, deepcopy(q), infer_memory, proper_message, online_inference_use, batch_size, dataset_size, convergence_optimizer)
         addNode!(currentGraph(), self)
         self.i[:out] = self.interfaces[1] = associate!(Interface(self), out)
         for k = 1:n_args
@@ -86,7 +88,7 @@ function Cvi(out::Variable, args::Vararg; g::Function, opt::Any,
              num_samples::Int, num_iterations::Union{Int,Vector{Int}},
              q=[ProbabilityDistribution(Univariate,GaussianMeanVariance,m=0,v=1)], infer_memory=0,
              proper_message=false, online_inference=false,
-             batch_size=1, dataset_size=1, id=ForneyLab.generateId(CVI))
+             batch_size=1, dataset_size=1, convergence_optimizer=nothing, id=ForneyLab.generateId(CVI))
     CVI(id, g, opt, num_iterations, num_samples, q, infer_memory, proper_message,
-        online_inference, batch_size, dataset_size, out, args...)
+        online_inference, batch_size, dataset_size, convergence_optimizer, out, args...)
 end

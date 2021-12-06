@@ -14,7 +14,7 @@ function ruleSPCVIIn1Factor(node_id::Symbol,
     end
 
     logp_nc(z) = (thenode.dataset_size/thenode.batch_size)*logPdf(msg_out.dist, thenode.g(z))
-    λ = renderCVI(logp_nc,thenode.num_iterations,thenode.opt,λ_init,msg_in)
+    λ = renderCVI(logp_nc,thenode.num_iterations,thenode.opt,λ_init,msg_in,thenode.convergence_optimizer)
 
     λ_message = λ.-η
     # Implement proper message check for all the distributions later on.
@@ -37,7 +37,7 @@ function ruleSPCVIIn1Factor(node_id::Symbol,
     end
 
     logp_nc(z) = (thenode.dataset_size/thenode.batch_size)*logPdf(msg_out.dist, thenode.g(z))
-    λ = renderCVI(logp_nc,thenode.num_iterations,thenode.opt,λ_init,msg_in)
+    λ = renderCVI(logp_nc,thenode.num_iterations,thenode.opt,λ_init,msg_in,thenode.convergence_optimizer)
 
     λ_message = λ.-η
 
@@ -61,7 +61,7 @@ function ruleSPCVIIn1Factor(node_id::Symbol,
     end
 
     logp_nc(z) = (thenode.dataset_size/thenode.batch_size)*logPdf(msg_out.dist, thenode.g(z))
-    λ = renderCVI(logp_nc,thenode.num_iterations,thenode.opt,λ_init,msg_in)
+    λ = renderCVI(logp_nc,thenode.num_iterations,thenode.opt,λ_init,msg_in,thenode.convergence_optimizer)
 
     λ_message = λ.-η
 
@@ -126,14 +126,21 @@ function ruleSPCVIInFactorX(node_id::Symbol,
     if thenode.infer_memory == 0
         for j=1:length(msgs_list)
             msg_in = msgs_list[j]
-            logp_nc(z) = sum(logPdf.([msg_out.dist],thenode.g.(arg_sample(z,inx_list[j])...)))/thenode.num_samples
+            # logp_nc(z) = sum(logPdf.([msg_out.dist],thenode.g.(arg_sample(z,inx_list[j])...)))/thenode.num_samples
+            # if thenode.online_inference[inx_list[j]]
+            #     λ_init = deepcopy(naturalParams(thenode.q[inx_list[j]]))
+            #     logp_nc(z) = (thenode.dataset_size/thenode.batch_size)*sum(logPdf.([msg_out.dist],thenode.g.(arg_sample(z,inx_list[j])...)))/thenode.num_samples
+            # else
+            #     λ_init = deepcopy(naturalParams(msg_in.dist))
+            # end
+            logp_nc = (z) -> sum(logPdf.([msg_out.dist],thenode.g.(arg_sample(z,inx_list[j])...)))/thenode.num_samples
             if thenode.online_inference[inx_list[j]]
                 λ_init = deepcopy(naturalParams(thenode.q[inx_list[j]]))
-                logp_nc(z) = (thenode.dataset_size/thenode.batch_size)*sum(logPdf.([msg_out.dist],thenode.g.(arg_sample(z,inx_list[j])...)))/thenode.num_samples
+                logp_nc = (z) -> (thenode.dataset_size/thenode.batch_size)*sum(logPdf.([msg_out.dist],thenode.g.(arg_sample(z,inx_list[j])...)))/thenode.num_samples
             else
                 λ_init = deepcopy(naturalParams(msg_in.dist))
             end
-            λ = renderCVI(logp_nc,thenode.num_iterations[inx_list[j]],thenode.opt[inx_list[j]],λ_init,msg_in)
+            λ = renderCVI(logp_nc,thenode.num_iterations[inx_list[j]],thenode.opt[inx_list[j]],λ_init,msg_in,thenode.convergence_optimizer)
             thenode.q[inx_list[j]] = standardDist(msg_in.dist,λ)
             if thenode.online_inference[inx_list[j]] == false thenode.q_memory[inx_list[j]] = deepcopy(thenode.q[inx_list[j]]) end
             push!(λ_list, λ)
@@ -188,7 +195,8 @@ function renderCVI(logp_nc::Function,
                    num_iterations::Int,
                    opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent},
                    λ_init::Vector,
-                   msg_in::Message{<:Gaussian, Univariate})
+                   msg_in::Message{<:Gaussian, Univariate},
+                   convergence_optimizer::Nothing)
 
     η = deepcopy(naturalParams(msg_in.dist))
     λ = deepcopy(λ_init)
@@ -218,7 +226,8 @@ function renderCVI(logp_nc::Function,
                    num_iterations::Int,
                    opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent},
                    λ_init::Vector,
-                   msg_in::Message{<:Gaussian, Multivariate})
+                   msg_in::Message{<:Gaussian, Multivariate},
+                   convergence_optimizer::Nothing)
 
     η = deepcopy(naturalParams(msg_in.dist))
     λ = deepcopy(λ_init)
@@ -248,7 +257,101 @@ function renderCVI(logp_nc::Function,
                    num_iterations::Int,
                    opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent},
                    λ_init::Vector,
-                   msg_in::Message{<:FactorNode, <:VariateType})
+                   msg_in::Message{<:FactorNode, <:VariateType},
+                   convergence_optimizer::Nothing)
+
+    η = deepcopy(naturalParams(msg_in.dist))
+    λ = deepcopy(λ_init)
+
+    A(η) = logNormalizer(msg_in.dist,η)
+    gradA(η) = A'(η) # Zygote
+    Fisher(η) = ForwardDiff.jacobian(gradA,η) # Zygote throws mutating array error
+    for i=1:num_iterations
+        q = standardDist(msg_in.dist,λ)
+        z_s = sample(q)
+        logq(λ) = logPdf(q,λ,z_s)
+        ∇logq = logq'(λ)
+        ∇f = Fisher(λ)\(logp_nc(z_s).*∇logq)
+        λ_old = deepcopy(λ)
+        ∇ = λ .- η .- ∇f
+        update!(opt,λ,∇)
+        if isProper(standardDist(msg_in.dist,λ)) == false
+            λ = λ_old
+        end
+    end
+
+    return λ
+
+end
+
+function renderCVI(logp_nc::Function,
+                   num_iterations::Int,
+                   opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent},
+                   λ_init::Vector,
+                   msg_in::Message{<:Gaussian, Univariate},
+                   convergence_optimizer::Conv) where Conv<:ConvergenceOptimizer
+
+    η = deepcopy(naturalParams(msg_in.dist))
+    λ = deepcopy(λ_init)
+
+    df_m(z) = ForwardDiff.derivative(logp_nc,z)
+    df_v(z) = 0.5*ForwardDiff.derivative(df_m,z)
+
+    for i=1:num_iterations
+        q = standardDist(msg_in.dist,λ)
+        z_s = sample(q)
+        df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
+        df_μ2 = df_v(z_s)
+        ∇f = [df_μ1, df_μ2]
+        λ_old = deepcopy(λ)
+        ∇ = λ .- η .- ∇f
+        update!(opt,λ,∇)
+        if isProper(standardDist(msg_in.dist,λ)) == false
+            λ = λ_old
+        end
+    end
+
+    return λ
+
+end
+
+function renderCVI(logp_nc::Function,
+                   num_iterations::Int,
+                   opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent},
+                   λ_init::Vector,
+                   msg_in::Message{<:Gaussian, Multivariate},
+                   convergence_optimizer::Conv) where Conv<:ConvergenceOptimizer
+
+    η = deepcopy(naturalParams(msg_in.dist))
+    λ = deepcopy(λ_init)
+
+    df_m(z) = ForwardDiff.gradient(logp_nc,z)
+    df_v(z) = 0.5*ForwardDiff.jacobian(df_m,z)
+
+    for i=1:num_iterations
+        q = standardDist(msg_in.dist,λ)
+        z_s = sample(q)
+        df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
+        df_μ2 = df_v(z_s)
+        ∇f = [df_μ1; vec(df_μ2)]
+        λ_old = deepcopy(λ)
+        ∇ = λ .- η .- ∇f
+        update!(opt,λ,∇)
+        if isProper(standardDist(msg_in.dist,λ)) == false
+            λ = λ_old
+        end
+    end
+
+    return λ
+
+end
+
+function renderCVI(logp_nc::Function,
+                   num_iterations::Int,
+                   opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent},
+                   λ_init::Vector,
+                   msg_in::Message{<:FactorNode, <:VariateType},
+                   convergence_optimizer::Conv) where Conv<:ConvergenceOptimizer
 
     η = deepcopy(naturalParams(msg_in.dist))
     λ = deepcopy(λ_init)

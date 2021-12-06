@@ -2,7 +2,7 @@ module ForneyLab
 
 using Base.Meta: parse
 using Base64: base64encode
-using LinearAlgebra: diag, det, tr, cholesky, pinv, PosDefException
+using LinearAlgebra: diag, det, tr, cholesky, pinv, PosDefException, norm
 using SparseArrays: spzeros
 using SpecialFunctions: digamma, erfc, logfactorial, logabsgamma, logabsbeta, gamma, loggamma, erf
 using LinearAlgebra: Diagonal, Hermitian, isposdef, ishermitian, I, tr, eigvals, logdet
@@ -10,12 +10,12 @@ using InteractiveUtils: subtypes
 using Printf: @sprintf
 using StatsFuns: logmvgamma, betainvcdf, gammainvcdf, poisinvcdf
 using ForwardDiff
-using StatsBase: Weights
+using StatsBase: Weights, percentile, autocor
 using DataStructures: Queue, enqueue!, dequeue!
 using Flux.Optimise
 using Zygote
 
-import Statistics: mean, var, cov
+import Statistics: mean, var, cov, median
 import Base: +, -, *, ^, ==, exp, convert, show, prod!
 import LinearAlgebra: dot
 import StatsBase: sample

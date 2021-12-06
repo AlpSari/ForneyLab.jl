@@ -1,4 +1,4 @@
-export huge, tiny, cholinv, diageye, eye, format, *, ^, mat, step!, init, ForgetDelayDescent
+export huge, tiny, cholinv, diageye, eye, format, *, ^, mat, step!, init, ForgetDelayDescent, ConvergenceOptimizer, ConvergenceStatsFE, ConvergenceParamsFE, ConvergenceParamsMC
 
 """Cast input to a `Matrix` if necessary"""
 ensureMatrix(arr::AbstractMatrix{T}) where T<:Number = arr
@@ -250,3 +250,47 @@ function Optimise.apply!(o::ForgetDelayDescent, x, Δ)
     o.iteration_num = t+1
     ρ .* Δ
 end
+
+#---------------------------
+# Convergence diagnosis elements 
+#---------------------------
+
+abstract type ConvergenceOptimizer end
+Base.@kwdef mutable struct DefaultOptim <: ConvergenceOptimizer
+    max_iterations ::Int64 = Int64(1e5)
+    pareto_k_thr::Float64 = 0.7 # Pareto diagnostic threshold for scale parameter k
+    pareto_num_samples::Float64 = 10000.0 # Num of samples used for Pareto diagnostic
+end
+
+Base.@kwdef mutable struct ConvergenceStatsFE
+    F_prev::Float64 = Inf # FE from previous iterate
+    F_best::Float64 = Inf # Minimum attained FE
+    F_best_idx::Int64 = -1 # Index of Minimum attained FE
+    F_converge_idx::Int64 = -1 # Index of Minimum attained FE
+    ΔFE_rel::Float64 = Inf # Relative difference between F_now and F_prev
+    ΔFE_vect::Vector{Float64} = Vector{Float64}() # Relative difference vector
+    FE_vect::Vector{Float64} = Vector{Float64}() #TODO: delete this field later, this is for debugging
+end
+
+Base.@kwdef mutable struct ConvergenceParamsFE <: ConvergenceOptimizer
+    max_iterations::Int64 = Int64(1e5) # max number of iterations
+    eval_FE_window::Float64 = 0.002 # to calculate FE every  'eval_FE_window'th iteration
+    burn_in_min::Float64 = 0.05  # min number of samples burned (percentage)
+    burn_in_max::Float64 = 0.5 # max number of samples burned (percentage)
+    tolerance_mean::Float64 = 0.1 # mean threshold
+    tolerance_median::Float64 = 0.1 # median threshold
+    stats::ConvergenceStatsFE = ConvergenceStatsFE() # struct holding information about convergence checks
+    pareto_k_thr::Float64 = 0.7 # Pareto diagnostic threshold for scale parameter k
+    pareto_num_samples::Float64 = 10000.0 # Num of samples used for Pareto diagnostic
+end 
+
+Base.@kwdef mutable struct ConvergenceParamsMC <: ConvergenceOptimizer
+    max_iterations::Int64 = Int64(1e5) # max number of iterations
+    pareto_k_thr::Float64 = 0.7 # Pareto diagnostic threshold for scale parameter k
+    pareto_num_samples::Float64 = 10000.0 # Num of samples used for Pareto diagnostic
+    mcmc_num_chains::Int64 = 10 # Num of chains in MCMC simulation
+    mcmc_window_len::Float64 = 500 # Window length in MCMC simulation
+    rhat_cutoff::Float64 = 1.2 # Rhat maximum value
+    mcse_cutoff::Float64 = 1.0 # Monte Carlo Standard Error maximum value
+    ess_threshold::Float64 = 90. # Effective Sample Size minimum value
+end 
