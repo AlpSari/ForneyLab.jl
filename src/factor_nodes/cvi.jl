@@ -39,11 +39,9 @@ mutable struct CVI <: DeltaFactor
     i::Dict{Symbol,Interface}
 
     g::Function # Vector function that expresses the output as a function of the inputs
-    #opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent, Vector{Any}}
     opt::Any
     num_iterations::Union{Int,Vector{Int}}
     num_samples::Int
-    #q::Union{ProbabilityDistribution,Vector{ProbabilityDistribution}}
     q::Vector{<:ProbabilityDistribution}
     q_memory::Vector{<:ProbabilityDistribution}
     infer_memory::Int
@@ -53,7 +51,6 @@ mutable struct CVI <: DeltaFactor
     dataset_size::Int
 
     function CVI(id::Symbol, g::Function,
-                    #opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent, Vector{Any}},
                     opt::Any,
                     num_iterations::Union{Int,Vector{Int}}, num_samples::Int, q::Vector{<:ProbabilityDistribution},
                     infer_memory::Int, proper_message::Bool, online_inference::Union{Bool,Vector{Bool}},
