@@ -126,13 +126,6 @@ function ruleSPCVIInFactorX(node_id::Symbol,
     if thenode.infer_memory == 0
         for j=1:length(msgs_list)
             msg_in = msgs_list[j]
-            # logp_nc(z) = sum(logPdf.([msg_out.dist],thenode.g.(arg_sample(z,inx_list[j])...)))/thenode.num_samples
-            # if thenode.online_inference[inx_list[j]]
-            #     λ_init = deepcopy(naturalParams(thenode.q[inx_list[j]]))
-            #     logp_nc(z) = (thenode.dataset_size/thenode.batch_size)*sum(logPdf.([msg_out.dist],thenode.g.(arg_sample(z,inx_list[j])...)))/thenode.num_samples
-            # else
-            #     λ_init = deepcopy(naturalParams(msg_in.dist))
-            # end
             logp_nc = (z) -> sum(logPdf.([msg_out.dist],thenode.g.(arg_sample(z,inx_list[j])...)))/thenode.num_samples
             if thenode.online_inference[inx_list[j]]
                 λ_init = deepcopy(naturalParams(thenode.q[inx_list[j]]))
