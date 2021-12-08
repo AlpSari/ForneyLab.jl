@@ -290,6 +290,19 @@ function renderCVI(logp_nc::Function,
     df_m(z) = ForwardDiff.derivative(logp_nc,z)
     df_v(z) = 0.5*ForwardDiff.derivative(df_m,z)
 
+    # Δ_FE method
+    convergence_optimizer.stats = ConvergenceStatsFE() # RESET STATS
+    stats = convergence_optimizer.stats
+    # Init Free Energy Optimization Parameters
+    eval_FE_window = Int64(ceil(convergence_optimizer.max_iterations*convergence_optimizer.eval_FE_window))
+    burn_in_min = Int64(ceil(convergence_optimizer.max_iterations*convergence_optimizer.burn_in_min))
+    burn_in_max = Int64(ceil(convergence_optimizer.max_iterations*convergence_optimizer.burn_in_max))
+    FE_check = false
+    is_FE_converged = false
+    tolerance_mean = convergence_optimizer.tolerance_mean
+    tolerance_median = convergence_optimizer.tolerance_median
+    FE_max_threshold = 0.0
+
     for i=1:num_iterations
         q = standardDist(msg_in.dist,λ)
         z_s = sample(q)
@@ -302,11 +315,71 @@ function renderCVI(logp_nc::Function,
         if isProper(standardDist(msg_in.dist,λ)) == false
             λ = λ_old
         end
+
+        #ΔFE
+        # Burn in period
+        if 1<= i<=burn_in_min
+            #FE = kl_Nat(λ,η,msg_in.dist) - logp_nc(z_s)
+            #FE_max_threshold += FE
+            if i == 1 #burn_in_min
+                FE = kl_Nat(λ,η,msg_in.dist) - logp_nc(z_s)
+                #stats.F_best = FE_max_threshold/(burn_in_min)
+                #stats.F_prev = deepcopy(stats.F_best)
+                #stats.F_best_idx = burn_in_min
+                stats.F_best = FE
+                stats.F_prev = deepcopy(stats.F_best)
+                stats.F_best_idx = 1
+            end
+        # End of burn in period
+        elseif mod(i,eval_FE_window) == 0
+            FE = kl_Nat(λ,η,msg_in.dist) - logp_nc(z_s)
+            # First condition to start tests: FE is smaller than initial FE
+            if FE_check == false && FE < stats.F_best
+                FE_check = true # FE dropped below initial ELBO
+            # Second condition to start tests: i exceeds burn_in_max period
+            # elseif FE_check == false && i > burn_in_max
+            #     FE_check = true
+            end
+            # If tests start, check convergence
+            if FE_check
+                is_FE_converged = ΔFE_check!(stats,FE,i,tolerance_mean,tolerance_median)
+                # Store λ yielding minimum Free Energy
+                if stats.F_best_idx == i
+                    λ_best = deepcopy(λ)
+                end
+            end
+            # If converged, stop iterations
+            if is_FE_converged
+                println("Algorithm converged at iteration $i")
+                break
+            end
+        end
+    end
+    if is_FE_converged && @isdefined λ_best
+        # return best iterate
+        λ_natural_posterior = λ_best
+    else
+        #return last iterate
+        λ_natural_posterior = λ
+    end
+    S = Int64(convergence_optimizer.pareto_num_samples)
+    k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_natural_posterior,S)
+
+    if isnan(k̂_new)
+        #println("Importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
+        println("Warning! Convergence diagnostic indicator is = $k̂_new")
+    elseif k̂_new >= convergence_optimizer.pareto_k_thr
+        #println("Warning, fitted Pareto shape parameter = $k̂_new ")#≧ $(convergence_optimizer.pareto_k_thr)!")
+        println("Warning! Convergence diagnostic indicator is = $k̂_new")
+    else
+        #println("Fitted Pareto shape parameter = $k̂_new")
+        println("Convergence diagnostic indicator is = $k̂_new")
     end
 
-    return λ
+    return λ_natural_posterior
 
 end
+
 
 function renderCVI(logp_nc::Function,
                    num_iterations::Int,
@@ -321,6 +394,19 @@ function renderCVI(logp_nc::Function,
     df_m(z) = ForwardDiff.gradient(logp_nc,z)
     df_v(z) = 0.5*ForwardDiff.jacobian(df_m,z)
 
+    # Δ_FE method
+    convergence_optimizer.stats = ConvergenceStatsFE() # RESET STATS
+    stats = convergence_optimizer.stats
+    # Init Free Energy Optimization Parameters
+    eval_FE_window = Int64(ceil(convergence_optimizer.max_iterations*convergence_optimizer.eval_FE_window))
+    burn_in_min = Int64(ceil(convergence_optimizer.max_iterations*convergence_optimizer.burn_in_min))
+    burn_in_max = Int64(ceil(convergence_optimizer.max_iterations*convergence_optimizer.burn_in_max))
+    FE_check = false
+    is_FE_converged = false
+    tolerance_mean = convergence_optimizer.tolerance_mean
+    tolerance_median = convergence_optimizer.tolerance_median
+    FE_max_threshold = 0.0
+
     for i=1:num_iterations
         q = standardDist(msg_in.dist,λ)
         z_s = sample(q)
@@ -333,9 +419,67 @@ function renderCVI(logp_nc::Function,
         if isProper(standardDist(msg_in.dist,λ)) == false
             λ = λ_old
         end
+        #ΔFE
+        # Burn in period
+        if 1<= i<=burn_in_min
+            #FE = kl_Nat(λ,η,msg_in.dist) - logp_nc(z_s)
+            #FE_max_threshold += FE
+            if i == 1 #burn_in_min
+                FE = kl_Nat(λ,η,msg_in.dist) - logp_nc(z_s)
+                #stats.F_best = FE_max_threshold/(burn_in_min)
+                #stats.F_prev = deepcopy(stats.F_best)
+                #stats.F_best_idx = burn_in_min
+                stats.F_best = FE
+                stats.F_prev = deepcopy(stats.F_best)
+                stats.F_best_idx = 1
+            end
+        # End of burn in period
+        elseif mod(i,eval_FE_window) == 0
+            FE = kl_Nat(λ,η,msg_in.dist) - logp_nc(z_s)
+            # First condition to start tests: FE is smaller than initial FE
+            if FE_check == false && FE < stats.F_best
+                FE_check = true # FE dropped below initial ELBO
+            # Second condition to start tests: i exceeds burn_in_max period
+            # elseif FE_check == false && i > burn_in_max
+            #     FE_check = true
+            end
+            # If tests start, check convergence
+            if FE_check
+                is_FE_converged = ΔFE_check!(stats,FE,i,tolerance_mean,tolerance_median)
+                # Store λ yielding minimum Free Energy
+                if stats.F_best_idx == i
+                    λ_best = deepcopy(λ)
+                end
+            end
+            # If converged, stop iterations
+            if is_FE_converged
+                println("Algorithm converged at iteration $i")
+                break
+            end
+        end
+    end
+    if is_FE_converged && @isdefined λ_best
+        # return best iterate
+        λ_natural_posterior = λ_best
+    else
+        #return last iterate
+        λ_natural_posterior = λ
+    end
+    S = Int64(convergence_optimizer.pareto_num_samples)
+    k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_natural_posterior,S)
+
+    if isnan(k̂_new)
+        #println("Importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
+        println("Warning! Convergence diagnostic indicator is = $k̂_new")
+    elseif k̂_new >= convergence_optimizer.pareto_k_thr
+        #println("Warning, fitted Pareto shape parameter = $k̂_new ")#≧ $(convergence_optimizer.pareto_k_thr)!")
+        println("Warning! Convergence diagnostic indicator is = $k̂_new")
+    else
+        #println("Fitted Pareto shape parameter = $k̂_new")
+        println("Convergence diagnostic indicator is = $k̂_new")
     end
 
-    return λ
+    return λ_natural_posterior
 
 end
 
@@ -352,6 +496,18 @@ function renderCVI(logp_nc::Function,
     A(η) = logNormalizer(msg_in.dist,η)
     gradA(η) = A'(η) # Zygote
     Fisher(η) = ForwardDiff.jacobian(gradA,η) # Zygote throws mutating array error
+    # Δ_FE method
+    convergence_optimizer.stats = ConvergenceStatsFE() # RESET STATS
+    stats = convergence_optimizer.stats
+    # Init Free Energy Optimization Parameters
+    eval_FE_window = Int64(ceil(convergence_optimizer.max_iterations*convergence_optimizer.eval_FE_window))
+    burn_in_min = Int64(ceil(convergence_optimizer.max_iterations*convergence_optimizer.burn_in_min))
+    burn_in_max = Int64(ceil(convergence_optimizer.max_iterations*convergence_optimizer.burn_in_max))
+    FE_check = false
+    is_FE_converged = false
+    tolerance_mean = convergence_optimizer.tolerance_mean
+    tolerance_median = convergence_optimizer.tolerance_median
+    FE_max_threshold = 0.0
     for i=1:num_iterations
         q = standardDist(msg_in.dist,λ)
         z_s = sample(q)
@@ -364,9 +520,67 @@ function renderCVI(logp_nc::Function,
         if isProper(standardDist(msg_in.dist,λ)) == false
             λ = λ_old
         end
+        #ΔFE
+        # Burn in period
+        if 1<= i<=burn_in_min
+            #FE = kl_Nat(λ,η,msg_in.dist) - logp_nc(z_s)
+            #FE_max_threshold += FE
+            if i == 1 #burn_in_min
+                FE = kl_Nat(λ,η,msg_in.dist) - logp_nc(z_s)
+                #stats.F_best = FE_max_threshold/(burn_in_min)
+                #stats.F_prev = deepcopy(stats.F_best)
+                #stats.F_best_idx = burn_in_min
+                stats.F_best = FE
+                stats.F_prev = deepcopy(stats.F_best)
+                stats.F_best_idx = 1
+            end
+        # End of burn in period
+        elseif mod(i,eval_FE_window) == 0
+            FE = kl_Nat(λ,η,msg_in.dist) - logp_nc(z_s)
+            # First condition to start tests: FE is smaller than initial FE
+            if FE_check == false && FE < stats.F_best
+                FE_check = true # FE dropped below initial ELBO
+            # Second condition to start tests: i exceeds burn_in_max period
+            # elseif FE_check == false && i > burn_in_max
+            #     FE_check = true
+            end
+            # If tests start, check convergence
+            if FE_check
+                is_FE_converged = ΔFE_check!(stats,FE,i,tolerance_mean,tolerance_median)
+                # Store λ yielding minimum Free Energy
+                if stats.F_best_idx == i
+                    λ_best = deepcopy(λ)
+                end
+            end
+            # If converged, stop iterations
+            if is_FE_converged
+                println("Algorithm converged at iteration $i")
+                break
+            end
+        end
+    end
+    if is_FE_converged && @isdefined λ_best
+        # return best iterate
+        λ_natural_posterior = λ_best
+    else
+        #return last iterate
+        λ_natural_posterior = λ
+    end
+    S = Int64(convergence_optimizer.pareto_num_samples)
+    k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_natural_posterior,S)
+
+    if isnan(k̂_new)
+        #println("Importance ratios are 0, fitted Pareto shape parameter = $k̂_new")
+        println("Warning! Convergence diagnostic indicator is = $k̂_new")
+    elseif k̂_new >= convergence_optimizer.pareto_k_thr
+        #println("Warning, fitted Pareto shape parameter = $k̂_new ")#≧ $(convergence_optimizer.pareto_k_thr)!")
+        println("Warning! Convergence diagnostic indicator is = $k̂_new")
+    else
+        #println("Fitted Pareto shape parameter = $k̂_new")
+        println("Convergence diagnostic indicator is = $k̂_new")
     end
 
-    return λ
+    return λ_natural_posterior
 
 end
 
@@ -449,4 +663,101 @@ function collectSumProductNodeInbounds(node::CVI, entry::ScheduleEntry)
     end
 
     return inbounds
+end
+
+
+
+# HELPERS
+
+# Pareto shape parameter fit function - using naturalparameters
+function Pareto_k_fit(logp_nc::Function,msg_in::Message{<:FactorNode, <:VariateType},λ_natural::Vector,S::F) where F<:Number
+    #S:number of samples
+    logp(z)= logPdf(msg_in.dist,naturalParams(msg_in.dist),z)
+    joint_pdf(z) = exp(logp(z)+logp_nc(z))
+    q = standardDist(msg_in.dist,λ_natural)
+    q_pdf(z) = exp(logPdf(q,λ_natural,z))
+    rs(z) = joint_pdf(z)/q_pdf(z) # importance ratio
+    if S<=225
+        M = Int64(ceil(S/5))
+    else
+        M = Int64(ceil(3*sqrt(S)))
+    end
+    #
+    samples = sample(q,S)
+    rs_samples = rs.(samples)
+    if any(isnan.(rs_samples))
+        k̂_new= NaN
+        return k̂_new
+    end
+    data = rs_samples[partialsortperm(rs_samples, 1:M,rev=true)]# Fit using M largest
+    n=length(data)
+    # Zhang and Stephens(2009) method
+    X =  percentile(data,25) #1st quartile
+    X_n = maximum(data)
+    m = 20+floor(sqrt(n))
+    θj_func(j) = (1/X_n)+floor(1-sqrt((m)/(j-0.5)))/(3*X)
+    k_func(θ)=-1.0*mean([log(1-θ*Xi) for Xi in data])
+    l_func(θ) = n*(log(θ\k_func(θ))+k_func(θ)-1)
+    θj_arr = θj_func.(1:m)
+    wj_func(θ_j) = 1/sum(exp.(l_func.(θj_arr).-l_func(θ_j)))
+    wj_arr =wj_func.(θj_arr)
+    θ_new_est =sum(θj_arr.*wj_arr)
+    k̂_new = -1.0*mean(log.(1.0 .- θ_new_est*data))
+    #Bias Correction
+    if S<1000
+        k̂_new = (M*k̂_new+5)/(M+10)
+    end
+    return k̂_new
+end
+# KL(q||p)
+function kl_Nat(λ::Vector,λ_0::Vector,dist::ProbabilityDistribution{Univariate, F}) where F <: Gaussian
+    # 0.5 [log(σ^2/σ_0^2)+(σ^2+(μ-μ_0)^2)/(σ_0)^2-1]
+    σ2_q = -0.5/λ[2]
+    σ2_p = -0.5/λ_0[2]
+    μ_q = λ[1]*σ2_q
+    μ_p = λ_0[1]*σ2_p
+    return 0.5 *(log(σ2_q/σ2_p)+ (σ2_q+(μ_q-μ_p)^2)/(σ2_p)-1)
+end
+
+function kl_Nat(λ::Vector,λ_0::Vector,dist::ProbabilityDistribution{Multivariate, F}) where F <: Gaussian
+    d = dims(dist)
+    XI_q, S = λ[1:d], reshape(-2*λ[d+1:end],d,d)
+    XI_p, S_p = λ_0[1:d], reshape(-2*λ_0[d+1:end],d,d)
+    Σ = cholinv(S)
+
+    μ_q = Σ*XI_q
+    μ_p = cholinv(S_p)*XI_p
+    Δμ = μ_q-μ_p
+    return 0.5*(logdet(S)-logdet(S_p)-d+tr(S_p*Σ)+dot(Δμ,S_p*Δμ))
+end
+function kl_Nat(λ::Vector,λ_0::Vector,dist::ProbabilityDistribution)
+    q = standardDist(dist,λ)
+    p = standardDist(dist,λ_0)
+    z_s = sample(q)
+    return logPdf(q,z_s)-logPdf(p,z_s)
+end
+
+function ΔFE_check!(stats::ConvergenceStatsFE,F_now::Float64,idx_now::Int64,tolerance::Float64)
+    ΔFE_check!(stats,F_now,idx_now,tolerance,tolerance)
+end
+function ΔFE_check!(stats::ConvergenceStatsFE,F_now::Float64,idx_now::Int64,tolerance_mean::Float64,tolerance_median::Float64)
+    # Return true if Free Energy is converged, return false else
+    push!(stats.FE_vect,F_now)
+    if F_now < stats.F_best
+        stats.F_best = deepcopy(F_now)
+        stats.F_best_idx = deepcopy(idx_now)
+    end
+    stats.ΔFE_rel = abs(100*(F_now-stats.F_prev)/(stats.F_prev))
+    push!(stats.ΔFE_vect,stats.ΔFE_rel)
+    # Calculate mean/median
+    vect_mean = mean(stats.ΔFE_vect)
+    vect_median = median(stats.ΔFE_vect)
+    if (vect_mean < tolerance_mean && length(stats.ΔFE_vect)>100) || (vect_median < tolerance_median && length(stats.ΔFE_vect)>100)
+        stats.F_converge_idx = deepcopy(idx_now)
+        stats.F_prev = deepcopy(F_now) #Also becomes F at convergence
+        return true
+    else # No convergence, get ready for the next call of the function
+        stats.F_prev = deepcopy(F_now)
+        return false
+    end
 end
