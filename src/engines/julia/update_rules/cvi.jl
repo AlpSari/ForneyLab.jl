@@ -282,7 +282,7 @@ function renderCVI(logp_nc::Function,
                    opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent},
                    λ_init::Vector,
                    msg_in::Message{<:Gaussian, Univariate},
-                   convergence_optimizer::Conv) where Conv<:ConvergenceOptimizer
+                   convergence_optimizer::ConvergenceParamsFE)
 
     η = deepcopy(naturalParams(msg_in.dist))
     λ = deepcopy(λ_init)
@@ -386,7 +386,7 @@ function renderCVI(logp_nc::Function,
                    opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent},
                    λ_init::Vector,
                    msg_in::Message{<:Gaussian, Multivariate},
-                   convergence_optimizer::Conv) where Conv<:ConvergenceOptimizer
+                   convergence_optimizer::ConvergenceParamsFE)
 
     η = deepcopy(naturalParams(msg_in.dist))
     λ = deepcopy(λ_init)
@@ -488,7 +488,7 @@ function renderCVI(logp_nc::Function,
                    opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent},
                    λ_init::Vector,
                    msg_in::Message{<:FactorNode, <:VariateType},
-                   convergence_optimizer::Conv) where Conv<:ConvergenceOptimizer
+                   convergence_optimizer::ConvergenceParamsFE)
 
     η = deepcopy(naturalParams(msg_in.dist))
     λ = deepcopy(λ_init)
@@ -731,6 +731,7 @@ function kl_Nat(λ::Vector,λ_0::Vector,dist::ProbabilityDistribution{Multivaria
     return 0.5*(logdet(S)-logdet(S_p)-d+tr(S_p*Σ)+dot(Δμ,S_p*Δμ))
 end
 function kl_Nat(λ::Vector,λ_0::Vector,dist::ProbabilityDistribution)
+    #TODO: This ---
     q = standardDist(dist,λ)
     p = standardDist(dist,λ_0)
     z_s = sample(q)
@@ -750,8 +751,14 @@ function ΔFE_check!(stats::ConvergenceStatsFE,F_now::Float64,idx_now::Int64,tol
     stats.ΔFE_rel = abs(100*(F_now-stats.F_prev)/(stats.F_prev))
     push!(stats.ΔFE_vect,stats.ΔFE_rel)
     # Calculate mean/median
-    vect_mean = mean(stats.ΔFE_vect)
-    vect_median = median(stats.ΔFE_vect)
+    if length(stats.ΔFE_vect) >10
+        vect_mean = mean(stats.ΔFE_vect[end-4:end])
+        vect_median = median(stats.ΔFE_vect[end-4:end])
+    else
+        vect_mean = mean(stats.ΔFE_vect)
+        vect_median = median(stats.ΔFE_vect)
+    end
+
     if (vect_mean < tolerance_mean && length(stats.ΔFE_vect)>100) || (vect_median < tolerance_median && length(stats.ΔFE_vect)>100)
         stats.F_converge_idx = deepcopy(idx_now)
         stats.F_prev = deepcopy(F_now) #Also becomes F at convergence
@@ -760,4 +767,321 @@ function ΔFE_check!(stats::ConvergenceStatsFE,F_now::Float64,idx_now::Int64,tol
         stats.F_prev = deepcopy(F_now)
         return false
     end
+end
+
+
+function oneWindowSimulation_MCMC(J::F,Window::F,opts,λ_initials::Vector,logp_nc::Function,is_first_sim::Bool,msg_in::Message{<:FactorNode, <:VariateType}) where F<:Number
+    # Chain Initialization
+    if is_first_sim
+        # First sim -> initial point is the same for all chains
+        params_container = [[λ_initials] for j=1:J]
+        opt_matrix =[deepcopy(opts) for j =1:J]
+    else
+        # Not first -> chains are at different points
+        params_container = [[λ_initials[j]] for j=1:J]
+        opt_matrix =deepcopy(opts)
+    end
+    # Run one simulation window for all chains
+    # Start simulation --- This part is specific for each msg_in
+    η = deepcopy(naturalParams(msg_in.dist))
+    A(η) = logNormalizer(msg_in.dist,η)
+    gradA(η) = A'(η) # Zygote
+    Fisher(η) = ForwardDiff.jacobian(gradA,η) # Zygote throws mutating array error
+    for n =1:Window
+        for j=1:J
+            push!(params_container[j],deepcopy(params_container[j][end]))
+            q = standardDist(msg_in.dist,params_container[j][end])
+            z_s = sample(q)
+            logq(λ) = logPdf(q,λ,z_s)
+            ∇logq = logq'(params_container[j][end])
+            ∇f = Fisher(params_container[j][end])\(logp_nc(z_s).*∇logq)
+            λ_old = deepcopy(params_container[j][end])
+            ∇ = params_container[j][end] .- η .- ∇f
+            update!(opt_matrix[j],params_container[j][end],∇)
+            if isProper(standardDist(msg_in.dist,params_container[j][end])) == false
+                params_container[j][end] = λ_old
+            end
+        end
+    end
+    last_params = [params_container[j][end] for j=1:J]
+    # --- End of Simulation
+    # Calculate Where to split the chain
+    total_len =Window+1
+    k =  mod(Window,4) # how many extra samples to include in burn_in
+    burn_in = Int64((Window-k)/2)+1+k  # Half of a chain
+    half_chain_end = 3*Int64((Window-k)/4)+1+k # Mid of last half
+    n = half_chain_end - burn_in  #Samples per split-chain
+    # Split chains in half
+    split_chains = [params_container[j][start_idx:end_idx] for j=1:J for (start_idx,end_idx) in zip((burn_in+1,half_chain_end+1),(half_chain_end,total_len))]
+    param_means = [mean(chain) for chain in split_chains]
+    #STATISTICS CALCULATION
+    idx_interest, range_interest = getStatisticsIndexMC(msg_in.dist)
+    interest_split_chains = [[x[idx_interest] for x in chain] for chain in split_chains]
+    chain_means = [mean(x) for x in interest_split_chains]
+    chain_vars = [var(x) for x in interest_split_chains]
+    # Calculate necessary statistics for Rhat,ESS and MCSE
+    W = mean(chain_vars) # mean of within chain variances
+    B_n = var(chain_means) # B/n : variance of means of chains
+    σ_2_plus = ((n-1)/n)*W+B_n
+    rhat = sqrt.(σ_2_plus./W) # Calculate Rhat
+
+    # CALCULATE ESS
+    ess_vect = []
+    for idx in range_interest
+        meanparam_ρ_tj= [autocor([λ[idx_interest][idx] for λ in split_chains[j]]) for j=1:2*J];#ρ_tj
+        meanparam_var_j=[chain_vars[j][idx] for j=1:2*J] #sj^2
+        weighted_corr = mean(meanparam_var_j.*meanparam_ρ_tj,dims=1)[1]
+        ρ_t = 1.0 .- (W[idx] .- weighted_corr)./(σ_2_plus[idx])
+        ess = (2*J)*n/(1+2*sum(ρ_t))
+        push!(ess_vect,ess)
+    end
+    # Calculate Monte Carlo Standard Error (MCSE)
+    mcse = sqrt.(σ_2_plus[idx_interest]./ess_vect)
+    # Calculate Iterate Average
+    # Note: Mean of means of chains is only true since chains have same sample size
+    λ_bar = mean(param_means)
+    stats_dict=Dict(:rhat=>rhat,:ess=>ess_vect,:mcse=>mcse,:λ_bar=>λ_bar)
+    return last_params,opt_matrix,stats_dict
+end
+
+function getStatisticsIndexMC(dist::ProbabilityDistribution{Univariate, F}) where F<: Gaussian
+    # Return indexes for mean parameter and ess for each μ
+    idx_of_interest = 1
+    range_of_interest = 1:1
+    return idx_of_interest,range_of_interest #Mean is the first index
+end
+function getStatisticsIndexMC(dist::ProbabilityDistribution{Multivariate, F}) where F<: Gaussian
+    # Return indexes for mean vector and ess for each μ_i in ̄μ
+    idx_of_interest = 1
+    n=dims(dist)
+    range_of_interest = 1:n
+    return idx_of_interest,range_of_interest #Mean is the first index
+end
+# For general case (TODO: Maybe implement different scenario for generic message)
+function getStatisticsIndexMC(dist::ProbabilityDistribution)
+    return 1,1:1
+end
+
+
+function renderCVI(logp_nc::Function,
+                   num_iterations::Int,
+                   opt::Union{Descent, Momentum, Nesterov, RMSProp, ADAM, ForgetDelayDescent},
+                   λ_init::Vector,
+                   msg_in::Message{<:FactorNode, <:VariateType},
+                   convergence_optimizer::ConvergenceParamsMC)
+
+    #MCMC params
+    W = convergence_optimizer.mcmc_window_len
+    J = convergence_optimizer.mcmc_num_chains
+    max_iter = Int64(floor(num_iterations/W))
+
+    is_stationary_achieved = false
+    is_mcmc_converged= false
+    λ_IA = zeros(length(λ_init)) # --> All zeros
+    stationary_counter = 0
+    # First simulation
+    last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Int64(W),opt,λ_init,logp_nc,true,msg_in)
+    # Rest of simulations until finding stationary distribution
+    for i= 2:max_iter
+        last_params,opt_matrix,stats_dict=oneWindowSimulation_MCMC(J,Int64(W),opt_matrix,last_params,logp_nc,false,msg_in)
+        if is_stationary_achieved==false && all(stats_dict[:rhat] .< convergence_optimizer.rhat_cutoff)
+            is_stationary_achieved = true
+        elseif is_stationary_achieved
+            λ_IA += stats_dict[:λ_bar] # accumulate
+            stationary_counter +=1
+            if all(stats_dict[:mcse] .< convergence_optimizer.mcse_cutoff) &&
+                all(stats_dict[:ess] .> convergence_optimizer.ess_threshold)
+                is_mcmc_converged = true
+                break
+            end
+        else
+            nothing #(not stationary -> continue)
+        end
+    end
+
+    if stationary_counter != 0
+    λ_IA = λ_IA./stationary_counter #take average
+    end
+    if !is_stationary_achieved
+        println("Warning: Stationary Distribution is not achieved.VI result might be inaccurate!")
+         return stats_dict[:λ_bar] # return the result from the last window of simulations
+    elseif is_mcmc_converged
+        println("VI converged.")
+        return λ_IA # return iterate averaging result
+    else
+        S = Int64(convergence_optimizer.pareto_num_samples)
+        k̂_new  = Pareto_k_fit(logp_nc,msg_in,λ_IA,S)
+        if isnan(k̂_new)
+            println("Stationary distribution achieved,, but importance ratios are 0, Convergence diagnostic indicator is = $k̂_new")
+        elseif k̂_new >= convergence_optimizer.pareto_k_thr
+            println("Warning! Stationary distribution achieved, but Convergence diagnostic indicator is = $k̂_new")
+        else
+            # Monte Carlo Standard Error and Effective Sample Size thresholds are not satisfied.
+            println("Stationary distribution achieved, but number of iterations used for iterate averaging might be less than necessary. Convergence Diagnostic Score is = $k̂_new")
+        end
+        return λ_IA
+    end
+end
+
+function oneWindowSimulation_MCMC(J::F,Window::F,opts,λ_initials::Vector,logp_nc::Function,is_first_sim::Bool,msg_in::Message{<:Gaussian, Univariate}) where F<:Number
+    # Chain Initialization
+    if is_first_sim
+        # First sim -> initial point is the same for all chains
+        params_container = [[λ_initials] for j=1:J]
+        opt_matrix =[deepcopy(opts) for j =1:J]
+    else
+        # Not first -> chains are at different points
+        params_container = [[λ_initials[j]] for j=1:J]
+        opt_matrix =deepcopy(opts)
+    end
+    # Run one simulation window for all chains
+    # Start simulation --- This part is specific for each msg_in
+
+    η = deepcopy(naturalParams(msg_in.dist))
+    df_m(z) = ForwardDiff.derivative(logp_nc,z)
+    df_v(z) = 0.5*ForwardDiff.derivative(df_m,z)
+
+    for n =1:Window
+        for j=1:J
+            push!(params_container[j],deepcopy(params_container[j][end]))
+            q = standardDist(msg_in.dist,params_container[j][end])
+            z_s = sample(q)
+            df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
+            df_μ2 = df_v(z_s)
+            ∇f = [df_μ1, df_μ2]
+            λ_old = deepcopy(params_container[j][end])
+            ∇ = params_container[j][end] .- η .- ∇f
+            update!(opt_matrix[j],params_container[j][end],∇)
+            if isProper(standardDist(msg_in.dist,params_container[j][end])) == false
+                params_container[j][end] = λ_old
+            end
+        end
+    end
+    last_params = [params_container[j][end] for j=1:J]
+    # --- End of Simulation
+    # Calculate Where to split the chain
+    total_len =Window+1
+    k =  mod(Window,4) # how many extra samples to include in burn_in
+    burn_in = Int64((Window-k)/2)+1+k  # Half of a chain
+    half_chain_end = 3*Int64((Window-k)/4)+1+k # Mid of last half
+    n = half_chain_end - burn_in  #Samples per split-chain
+    # Split chains in half
+    split_chains = [params_container[j][start_idx:end_idx] for j=1:J for (start_idx,end_idx) in zip((burn_in+1,half_chain_end+1),(half_chain_end,total_len))]
+    param_means = [mean(chain) for chain in split_chains]
+    #STATISTICS CALCULATION
+    idx_interest, range_interest = getStatisticsIndexMC(msg_in.dist)
+    interest_split_chains = [[λ[idx_interest] for λ in chain] for chain in split_chains]
+    chain_means = [mean(x) for x in interest_split_chains]
+    chain_vars = [var(x) for x in interest_split_chains]
+    # Calculate necessary statistics for Rhat,ESS and MCSE
+    W = mean(chain_vars) # mean of within chain variances
+    B_n = var(chain_means) # B/n : variance of means of chains
+    σ_2_plus = ((n-1)/n)*W+B_n # Posterior variance estimate
+    rhat = sqrt.(σ_2_plus./W) # Calculate Rhat
+    # CALCULATE ESS
+    # meanparam_ρ_tj: autocor lag t of chain j for λ[idx]
+    # meanparam_var_j: variance of λ[idx] in chain j
+    # weighted_corr: weighted autocorr of lag t of chain j for λ[idx]
+    # ρ_t: autocor at lag t for all-chains for λ[idx]
+    # ess: Effective sample size for λ[idx]
+
+    ess_vect = []
+    for idx in range_interest
+        meanparam_ρ_tj= [autocor([λ[idx] for λ in split_chains[j]]) for j=1:2*J];#ρ_tj
+        meanparam_var_j=[chain_vars[j][idx] for j=1:2*J] #sj^2
+        weighted_corr = mean(meanparam_var_j.*meanparam_ρ_tj,dims=1)[1]
+        ρ_t = 1.0 .- (W[idx] .- weighted_corr)./(σ_2_plus[idx])
+        ess = (2*J)*n/(1+2*sum(ρ_t))
+        push!(ess_vect,ess)
+    end
+    # Calculate Monte Carlo Standard Error (MCSE)
+    mcse = sqrt.(σ_2_plus[idx_interest]./ess_vect)
+    # Calculate Iterate Average
+    # Note: Mean of means of chains is only true since chains have same sample size
+    λ_bar = mean(param_means)
+    stats_dict=Dict(:rhat=>rhat,:ess=>ess_vect,:mcse=>mcse,:λ_bar=>λ_bar)
+    return last_params,opt_matrix,stats_dict
+end
+
+function oneWindowSimulation_MCMC(J::F,Window::F,opts,λ_initials::Vector,logp_nc::Function,is_first_sim::Bool,msg_in::Message{<:Gaussian, Multivariate}) where F<:Number
+    # Chain Initialization
+    if is_first_sim
+        # First sim -> initial point is the same for all chains
+        params_container = [[λ_initials] for j=1:J]
+        opt_matrix =[deepcopy(opts) for j =1:J]
+    else
+        # Not first -> chains are at different points
+        params_container = [[λ_initials[j]] for j=1:J]
+        opt_matrix =deepcopy(opts)
+    end
+    # Run one simulation window for all chains
+    # Start simulation --- This part is specific for each msg_in
+
+    η = deepcopy(naturalParams(msg_in.dist))
+    df_m(z) = ForwardDiff.gradient(logp_nc,z)
+    df_v(z) = 0.5*ForwardDiff.jacobian(df_m,z)
+
+    for n =1:Window
+        for j=1:J
+            push!(params_container[j],deepcopy(params_container[j][end]))
+            q = standardDist(msg_in.dist,params_container[j][end])
+            z_s = sample(q)
+            df_μ1 = df_m(z_s) - 2*df_v(z_s)*mean(q)
+            df_μ2 = df_v(z_s)
+            ∇f = [df_μ1; vec(df_μ2)]
+            λ_old = deepcopy(params_container[j][end])
+            ∇ = params_container[j][end] .- η .- ∇f
+            update!(opt_matrix[j],params_container[j][end],∇)
+            if isProper(standardDist(msg_in.dist,params_container[j][end])) == false
+                params_container[j][end] = λ_old
+            end
+        end
+    end
+    last_params = [params_container[j][end] for j=1:J]
+    # --- End of Simulation
+    # Calculate Where to split the chain
+    total_len =Window+1
+    k =  mod(Window,4) # how many extra samples to include in burn_in
+    burn_in = Int64((Window-k)/2)+1+k  # Half of a chain
+    half_chain_end = 3*Int64((Window-k)/4)+1+k # Mid of last half
+    n = half_chain_end - burn_in  #Samples per split-chain
+    # Split chains in half
+    split_chains = [params_container[j][start_idx:end_idx] for j=1:J for (start_idx,end_idx) in zip((burn_in+1,half_chain_end+1),(half_chain_end,total_len))]
+    param_means = [mean(chain) for chain in split_chains]
+    #STATISTICS CALCULATION
+    idx_interest, range_interest = getStatisticsIndexMC(msg_in.dist)
+    # Filter the range for which we are calculating statistics
+    interest_split_chains_arr = [[split_chains[j][k][range_interest] for k=1:n] for j=1:2*J]
+    ess_vect = [] # to store effective sample size (ess)
+    rhat_vect = [] # to store rhat statistic
+    mcse_vect = [] # to store Monte Carlo Standard Error (MCSE)
+    # ρ_tj: autocor lag t of chain j for λ[idx]
+    # var_j: variance of λ[idx] in chain j
+    # weighted_corr: weighted autocorr of lag t of chain j for λ[idx]
+    # ρ_t: autocor at lag t for all-chains for λ[idx]
+    # ess: Effective sample size for λ[idx]
+    for idx in range_interest
+        # Select each element in the defined range
+        interest_split_chains = [[interest_split_chains_arr[j][k][idx] for k=1:n] for j=1:2*J]
+        chain_means = [mean(x) for x in interest_split_chains]
+        chain_vars = [var(x) for x in interest_split_chains]
+        W = mean(chain_vars) # mean of within chain variances
+        B_n = var(chain_means) # B/n : variance of means of chains
+        σ_2_plus = ((n-1)/n)*W+B_n # Posterior variance estimate
+        rhat = sqrt.(σ_2_plus./W) # Calculate Rhat
+        ρ_tj= [autocor(chain,demean=false) for chain in interest_split_chains];#ρ_tj
+        var_j=chain_vars #sj^2
+        weighted_corr = mean(var_j.*ρ_tj)
+        ρ_t = 1.0 .- (W .- weighted_corr)./(σ_2_plus)
+        ess = (2*J)*n/(1+2*sum(ρ_t))
+        # Calculate Monte Carlo Standard Error (MCSE)
+        mcse = sqrt.(σ_2_plus[idx_interest]./ess_vect)
+        push!(ess_vect,ess)
+        push!(rhat_vect,rhat)
+        push!(mcse_vect,mcse)
+    end
+    # Note: Mean of means of chains is only true since chains have same sample size
+    λ_bar = mean(param_means)
+    stats_dict=Dict(:rhat=>rhat_vect,:ess=>ess_vect,:mcse=>mcse_vect,:λ_bar=>λ_bar)
+    return last_params,opt_matrix,stats_dict
 end
